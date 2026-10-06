@@ -1,4 +1,4 @@
-import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal } from './logic.js';
+import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal, toCSV } from './logic.js';
 
 const $ = id => document.getElementById(id);
 const STORAGE_KEY = 'splitsquad.v1';
@@ -188,6 +188,17 @@ $('expense-form').addEventListener('submit', event => {
     $('description').value = ''; $('amount').value = ''; $('everyone').checked = true;
     error('expense-error'); persist(); render();
   } catch (cause) { error('expense-error', cause.message); }
+});
+$('export-csv').addEventListener('click', () => {
+  const blob = new Blob(['\uFEFF', toCSV(state.people, state.expenses)], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'splitsquad.csv';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 $('reset').addEventListener('click', () => {
   if (!window.confirm('Reset this trip? All people and expenses will be removed.')) return;

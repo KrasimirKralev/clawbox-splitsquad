@@ -1,0 +1,2003 @@
+Reading additional input from stdin...
+OpenAI Codex v0.153.4
+--------
+workdir: /home/clawbox/expo-demo/runs/20261006-233530-fix/repo
+model: gpt-6-astra
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: none
+reasoning summaries: none
+session id: 01a112ee-12cd-77d3-af86-e8f82e926442
+--------
+user
+Implement this task in the repo with a minimal, idiomatic change and add a regression test.
+TASK:
+Add an 'Export CSV' button that downloads the expenses list and the final settlement (who pays whom, amounts) as a CSV file. CSV generation must live in logic.js as a pure, tested function with proper escaping of commas and quotes.
+
+RECON (from another engineer):
+I looked around without changing anything. All tests pass, and the export feature doesn't exist yet.
+
+**Stack:** A plain static web app (HTML, CSS and vanilla JavaScript modules) with no build step and no dependencies. Tests use Node's built-in `node:test` runner on Node v24.21.0. It's deployed to Vercel.
+
+**Install / test:** There's nothing to install because `package.json` lists no dependencies. Run tests from the repo root with:
+```
+npm test        # = node --test tests/
+```
+
+**Current status:** 14 tests, 14 pass, 0 fail (about 135 ms). The README still says "pass ?, fail ?".
+
+**Relevant files:**
+- `logic.js`: pure exported functions (`parseAmount`, `splitExpense`, `computeBalances`, `settle`, `tripTotal` and others). All money is integer cents. `settle()` returns `[{from, to, amount}]`. The new pure CSV function, for example `toCSV(people, expenses)`, goes here along with an escaping helper.
+- `tests/logic.test.mjs`: tests import named functions from `../logic.js`, so new tests go here. `tests/index.js` just re-imports that file.
+- `app.js`: holds the app state `{people, expenses}`. Each expense looks like `{id, description, amount, paidBy, participants}`. `render()` (~line 148) draws the settlement. `money()` formats amounts but lives in `app.js`, so `logic.js` needs its own cents-to-`12.34` formatter.
+- `index.html`: the "Settle up" section (lines 43–45) is the natural place for the button. There's an existing `.text-button` style to reuse.
+- `SPEC.md` may need a note.
+
+**Root cause / approach:** This is a missing feature rather than a bug. The plan:
+- Add a pure function to `logic.js` that builds two sections: expenses (description, amount, paid by, participants) and settlement (from, to, amount).
+- Escape fields per RFC 4180: wrap a field in quotes if it contains a comma, quote or newline, and double any quotes inside it.
+- Use `\r\n` line endings.
+- In `app.js`, wire the button to make a `Blob` from the CSV and download it through a temporary `<a download>` link.
+
+Descriptions and names are free text (up to 150 and 60 characters), so the escaping tests should cover commas, quotes and newlines. A protection against spreadsheet formula injection (fields starting with `=`) would be optional.
+
+INDEPENDENT PLAN (Hermes):
+Likely root cause
+This is a missing feature rather than a demonstrated calculation bug: expense and settlement data need a shared CSV serializer and a download action.
+
+Approach
+1. Add a pure export function in logic.js accepting expenses and final settlement data. Return CSV text without DOM access, downloads, or input mutation.
+2. Use clearly labeled expense and settlement sections with consistent column counts. Include expense description, payer, amount, and currency where supported; settlement rows identify who pays whom and how much.
+3. Centralize cell escaping: double embedded quotes, and quote cells containing commas, quotes, or line breaks. Preserve existing monetary precision and settlement calculations.
+4. Add an “Export CSV” button whose handler reads current state, calls the serializer, creates a UTF-8 CSV Blob, triggers download, and cleans up the object URL.
+
+Edge cases
+Empty expenses, no transfers required, Unicode names, multiline descriptions, zero amounts, and rounding boundaries. Define spreadsheet-formula protection for user-entered text separately from CSV escaping.
+
+Regression proof
+Unit tests assert exact CSV output for expenses plus transfers, escaping, empty data, deterministic output, and unchanged inputs. A UI test verifies the downloaded file reflects current expenses and the displayed settlement.
+
+Run the relevant tests until they pass. Do not commit. End with a 4-line summary.
+codex
+I’ll check the repo conventions, add the CSV function and download button, then add regression tests and run the suite.
+exec
+/bin/bash -lc "pwd; rg --files -g 'AGENTS.md' -g 'logic.js' -g 'app.js' -g 'index.html' -g '*test*' -g 'package.json' -g 'SPEC.md' -g '*.css'" in /home/clawbox/expo-demo/runs/20261006-233530-fix/repo
+ succeeded in 0ms:
+/home/clawbox/expo-demo/runs/20261006-233530-fix/repo
+SPEC.md
+style.css
+index.html
+logic.js
+app.js
+tests/logic.test.mjs
+package.json
+
+exec
+/bin/bash -lc 'git status --short; cat logic.js app.js index.html tests/logic.test.mjs package.json SPEC.md' in /home/clawbox/expo-demo/runs/20261006-233530-fix/repo
+ succeeded in 0ms:
+?? .astra.log
+/** Monetary values are always integer cents. Participant order breaks rounding ties. */
+export function parseAmount(value) {
+  const text = String(value).trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(text)) throw new Error('Enter a valid amount with up to 2 decimal places.');
+  const [whole, fraction = ''] = text.split('.');
+  const cents = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+  if (!Number.isSafeInteger(cents) || cents <= 0) throw new Error('Enter an amount greater than $0.00.');
+  return cents;
+}
+
+export function validateName(value, people) {
+  const name = value.trim();
+  if (!name) throw new Error('Enter a name to add someone.');
+  if (people.some(person => person.toLowerCase() === name.toLowerCase())) throw new Error('That name is already on the trip.');
+  return name;
+}
+
+export function splitExpense(amount, participants) {
+  if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error('Amount must be a positive integer in cents.');
+  if (!participants.length || new Set(participants).size !== participants.length) throw new Error('Select at least one unique participant.');
+  const base = Math.floor(amount / participants.length);
+  const remainder = amount % participants.length;
+  return Object.fromEntries(participants.map((person, index) => [person, base + (index < remainder ? 1 : 0)]));
+}
+
+export function computeBalances(people, expenses) {
+  if (new Set(people).size !== people.length) throw new Error('People must be unique.');
+  const balances = Object.fromEntries(people.map(person => [person, 0]));
+  for (const expense of expenses) {
+    if (!Object.hasOwn(balances, expense.paidBy) || expense.participants.some(person => !Object.hasOwn(balances, person))) throw new Error('Expense contains an unknown person.');
+    const shares = splitExpense(expense.amount, expense.participants);
+    balances[expense.paidBy] += expense.amount;
+    for (const [person, share] of Object.entries(shares)) balances[person] -= share;
+    if (Object.values(balances).some(value => !Number.isSafeInteger(value))) throw new Error('Trip amount is too large.');
+  }
+  return balances;
+}
+
+export function canRemovePerson(person, expenses) {
+  return !expenses.some(expense => expense.paidBy === person || expense.participants.includes(person));
+}
+
+export function tripTotal(expenses) {
+  const total = expenses.reduce((sum, expense) => sum + expense.amount, 0);
+  if (!Number.isSafeInteger(total)) throw new Error('Trip amount is too large.');
+  return total;
+}
+
+export function settle(balances) {
+  const entries = Object.entries(balances);
+  if (entries.some(([, amount]) => !Number.isSafeInteger(amount)) || entries.reduce((sum, [, amount]) => sum + amount, 0) !== 0) throw new Error('Balances must be integer cents and sum to zero.');
+  const debtors = entries.filter(([, amount]) => amount < 0).map(([name, amount]) => ({ name, amount: -amount }));
+  const creditors = entries.filter(([, amount]) => amount > 0).map(([name, amount]) => ({ name, amount }));
+  const transfers = [];
+  const biggestFirst = (a, b) => b.amount - a.amount;
+  while (debtors.length && creditors.length) {
+    debtors.sort(biggestFirst);
+    creditors.sort(biggestFirst);
+    const debtor = debtors[0], creditor = creditors[0];
+    const amount = Math.min(debtor.amount, creditor.amount);
+    transfers.push({ from: debtor.name, to: creditor.name, amount });
+    debtor.amount -= amount;
+    creditor.amount -= amount;
+    if (!debtor.amount) debtors.shift();
+    if (!creditor.amount) creditors.shift();
+  }
+  return transfers;
+}
+import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal } from './logic.js';
+
+const $ = id => document.getElementById(id);
+const STORAGE_KEY = 'splitsquad.v1';
+let state = { people: [], expenses: [] };
+let storageFailed = false;
+const money = cents => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(cents / 100);
+function error(id, message = '') { $(id).textContent = message; $(id).hidden = !message; }
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+function empty(container, icon, title, message) {
+  const box = element('div', 'empty');
+  const symbol = element('div', 'empty-icon', icon);
+  symbol.setAttribute('aria-hidden', 'true');
+  box.append(symbol, element('strong', '', title), element('p', '', message));
+  container.append(box);
+}
+function persist() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    $('save-status').replaceChildren(element('span', 'status-dot'), document.createTextNode('Saved on this device'));
+    if (storageFailed) { storageFailed = false; error('global-error'); }
+  } catch {
+    storageFailed = true;
+    $('save-status').textContent = 'Changes are not saved';
+    error('global-error', 'Device storage is unavailable. Keep this page open to keep your trip.');
+  }
+}
+let raw = null;
+try {
+  raw = localStorage.getItem(STORAGE_KEY);
+  if (raw) {
+    const saved = JSON.parse(raw);
+    if (!Array.isArray(saved.people) || !Array.isArray(saved.expenses)) throw new Error();
+    const checked = [];
+    for (const person of saved.people) {
+      if (typeof person !== 'string' || validateName(person, checked) !== person) throw new Error();
+      checked.push(person);
+    }
+    for (const expense of saved.expenses) {
+      if (typeof expense.id !== 'string' || typeof expense.description !== 'string' || !expense.description.trim() || !Array.isArray(expense.participants)) throw new Error();
+    }
+    if (new Set(saved.expenses.map(e => e.id)).size !== saved.expenses.length) throw new Error();
+    computeBalances(saved.people, saved.expenses);
+    tripTotal(saved.expenses);
+    state = saved;
+  }
+} catch {
+  let backedUp = false;
+  try {
+    if (raw) { localStorage.setItem(`${STORAGE_KEY}.backup-${Date.now()}`, raw); backedUp = true; }
+  } catch { /* storage unavailable; nothing more to preserve */ }
+  error('global-error', backedUp
+    ? 'We couldn’t restore saved trip data. A copy of it was kept on this device; you can start a new trip here.'
+    : 'We couldn’t restore saved trip data. You can start a new trip here.');
+  $('save-status').textContent = 'Saved trip unavailable';
+}
+
+function renderParticipants(selected = new Set(state.people)) {
+  $('participants').replaceChildren();
+  for (const person of state.people) {
+    const label = element('label', 'participant');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = person;
+    checkbox.checked = $('everyone').checked || selected.has(person);
+    checkbox.addEventListener('change', syncEveryone);
+    label.append(checkbox, document.createTextNode(person));
+    $('participants').append(label);
+  }
+  syncEveryone();
+}
+function syncEveryone() {
+  const inputs = [...$('participants').querySelectorAll('input')];
+  if (!inputs.length) return;
+  const count = inputs.filter(input => input.checked).length;
+  $('everyone').checked = inputs.length > 0 && count === inputs.length;
+  $('everyone').indeterminate = count > 0 && count < inputs.length;
+}
+function focusAfterRemoval(selector, index, fallbackId) {
+  const buttons = document.querySelectorAll(selector);
+  const target = buttons[Math.min(index, buttons.length - 1)];
+  (target || $(fallbackId)).focus();
+}
+function render() {
+  const selected = new Set([...$('participants').querySelectorAll('input:checked')].map(input => input.value));
+  const oldPayer = $('payer').value;
+  $('people-count').textContent = state.people.length;
+  $('expense-count').textContent = state.expenses.length;
+  $('tab-count').textContent = `${state.expenses.length} expense${state.expenses.length === 1 ? '' : 's'}`;
+  $('people-list').replaceChildren();
+  $('payer').replaceChildren();
+  if (!state.people.length) $('payer').append(new Option('Add people first', ''));
+  for (const [personIndex, person] of state.people.entries()) {
+    const chip = element('div', 'chip');
+    const remove = element('button', '', '×');
+    remove.type = 'button';
+    remove.setAttribute('aria-label', `Remove ${person}`);
+    remove.addEventListener('click', () => {
+      if (!canRemovePerson(person, state.expenses)) {
+        error('person-error', `${person} is part of an expense. Delete their expenses before removing them.`);
+        return;
+      }
+      state.people = state.people.filter(name => name !== person);
+      error('person-error');
+      persist(); render();
+      focusAfterRemoval('#people-list button', personIndex, 'person-name');
+    });
+    chip.append(element('span', 'chip-name', person), remove);
+    $('people-list').append(chip);
+    $('payer').append(new Option(person, person));
+  }
+  if (state.people.includes(oldPayer)) $('payer').value = oldPayer;
+  renderParticipants(selected);
+  $('people-hint').hidden = state.people.length >= 2;
+  const total = tripTotal(state.expenses);
+  $('total').textContent = money(total);
+  $('average').textContent = money(state.people.length ? Math.round(total / state.people.length) : 0);
+  const balances = computeBalances(state.people, state.expenses);
+  $('balance-area').hidden = !state.people.length;
+  $('balances').replaceChildren();
+  for (const [person, balance] of Object.entries(balances)) {
+    const row = element('div', 'balance-row');
+    row.append(element('span', '', person), element('strong', balance > 0 ? 'positive' : balance < 0 ? 'negative' : 'neutral', `${balance > 0 ? '+' : balance < 0 ? '−' : ''}${money(Math.abs(balance))}`));
+    $('balances').append(row);
+  }
+  $('expense-list').replaceChildren();
+  if (!state.expenses.length) empty($('expense-list'), '▤', 'The adventure starts here', 'Add your first expense and we’ll handle the math.');
+  for (const [expenseIndex, expense] of [...state.expenses].reverse().entries()) {
+    const row = element('div', 'expense-row');
+    const detail = element('div', 'expense-detail');
+    detail.append(element('strong', '', expense.description), element('small', '', `${expense.paidBy} paid · Shared by ${expense.participants.join(', ')}`));
+    const remove = element('button', 'delete-expense', '×');
+    remove.type = 'button';
+    remove.setAttribute('aria-label', `Delete expense: ${expense.description}`);
+    remove.addEventListener('click', () => {
+      state.expenses = state.expenses.filter(item => item.id !== expense.id);
+      persist(); render();
+      focusAfterRemoval('#expense-list .delete-expense', expenseIndex, 'description');
+    });
+    row.append(detail, element('strong', 'expense-value', money(expense.amount)), remove);
+    $('expense-list').append(row);
+  }
+  $('settlements').replaceChildren();
+  const transfers = settle(balances);
+  if (!transfers.length) {
+    empty($('settlements'), '✓', state.expenses.length ? 'Everyone’s square!' : 'Nothing to settle. Yet.', state.expenses.length ? 'All balances are even. On to the next adventure.' : 'Once expenses are in, see who pays whom here.');
+  }
+  for (const payment of transfers) {
+    const row = element('div', 'payment');
+    const route = element('div', 'payment-route');
+    route.append(element('strong', '', payment.from), element('span', '', '→'), element('strong', '', payment.to));
+    row.append(route, element('span', 'payment-amount', money(payment.amount)));
+    row.setAttribute('aria-label', `${payment.from} pays ${payment.to} ${money(payment.amount)}`);
+    $('settlements').append(row);
+  }
+}
+$('person-form').addEventListener('submit', event => {
+  event.preventDefault();
+  try {
+    const name = validateName($('person-name').value, state.people);
+    state.people.push(name);
+    $('person-name').value = '';
+    error('person-error'); persist(); render(); $('person-name').focus();
+  } catch (cause) { error('person-error', cause.message); }
+});
+$('everyone').addEventListener('change', () => {
+  $('everyone').indeterminate = false;
+  for (const input of $('participants').querySelectorAll('input')) input.checked = $('everyone').checked;
+});
+$('expense-form').addEventListener('submit', event => {
+  event.preventDefault();
+  try {
+    if (!state.people.length) throw new Error('Add people to the squad before adding an expense.');
+    const description = $('description').value.trim();
+    if (!description) throw new Error('Give this expense a short description.');
+    const amount = parseAmount($('amount').value);
+    const participants = [...$('participants').querySelectorAll('input:checked')].map(input => input.value);
+    if (!participants.length) throw new Error('Select at least one person to share this expense.');
+    const expense = { id: crypto.randomUUID(), description, amount, paidBy: $('payer').value, participants };
+    const expenses = [...state.expenses, expense];
+    tripTotal(expenses); computeBalances(state.people, expenses);
+    state.expenses = expenses;
+    $('description').value = ''; $('amount').value = ''; $('everyone').checked = true;
+    error('expense-error'); persist(); render();
+  } catch (cause) { error('expense-error', cause.message); }
+});
+$('reset').addEventListener('click', () => {
+  if (!window.confirm('Reset this trip? All people and expenses will be removed.')) return;
+  state = { people: [], expenses: [] };
+  $('person-form').reset(); $('expense-form').reset();
+  error('person-error'); error('expense-error'); error('global-error');
+  persist(); render();
+});
+render();
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#106c75">
+  <meta name="description" content="Less money math. More good times. Split your trip expenses and settle up with friends.">
+  <title>SplitSquad — Good times, split fairly.</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <main class="app">
+    <header class="hero">
+      <div class="brand-row"><a class="brand" href="./" aria-label="SplitSquad home"><span class="brand-icon" aria-hidden="true">⇄</span>SplitSquad<span class="brand-dot">.</span></a><span class="trip-tag">THE TRIP TAB</span></div>
+      <h1>Good times.<br>Split fairly.</h1>
+      <p>Less money math. More memories.</p>
+      <div class="totals" aria-live="polite">
+        <div><span class="stat-label">Total trip spend</span><strong id="total">$0.00</strong></div>
+        <div><span class="stat-label">Cost per person <span title="Average trip spend across all people">↗</span></span><strong id="average">$0.00</strong></div>
+      </div>
+    </header>
+    <div class="status-bar"><span id="save-status"><span class="status-dot"></span> Saved on this device</span><button id="reset" class="text-button" type="button">Reset trip <span aria-hidden="true">↺</span></button></div>
+    <p id="global-error" class="error global-error" role="alert" hidden></p>
+    <section class="card" aria-labelledby="people-title">
+      <div class="card-heading"><span class="section-icon" aria-hidden="true">♧</span><div><h2 id="people-title">The squad <span id="people-count" class="count">0</span></h2><p>Who's coming along?</p></div><span class="step">01</span></div>
+      <form id="person-form" novalidate><label class="sr-only" for="person-name">Person's name</label><div class="input-row"><input id="person-name" placeholder="Enter a friend's name" autocomplete="off" maxlength="60" aria-describedby="person-error"><button class="primary add-button" type="submit"><span aria-hidden="true">＋</span> Add</button></div><p id="person-error" class="error" role="alert" hidden></p></form>
+      <div id="people-list" class="people-list"></div>
+      <p id="people-hint" class="hint">Add at least 2 people to get the good times going.</p>
+      <div id="balance-area" class="balance-area" hidden><div class="subheading">LIVE BALANCES <span>Paid − share</span></div><div id="balances"></div></div>
+    </section>
+    <section class="card" aria-labelledby="expenses-title">
+      <div class="card-heading"><span class="section-icon" aria-hidden="true">▤</span><div><h2 id="expenses-title">Expenses <span id="expense-count" class="count">0</span></h2><p>Big adventures. Little receipts.</p></div><span class="step">02</span></div>
+      <form id="expense-form" novalidate>
+        <div class="field"><label for="description">What was it for?</label><input id="description" placeholder="e.g. Dinner by the beach" maxlength="150" aria-describedby="expense-error"></div>
+        <div class="form-columns"><div class="field"><label for="amount">Amount</label><div class="amount-input"><span aria-hidden="true">$</span><input id="amount" inputmode="decimal" placeholder="0.00" aria-describedby="expense-error"></div></div><div class="field"><label for="payer">Paid by</label><select id="payer" aria-describedby="expense-error"><option value="">Select a person</option></select></div></div>
+        <fieldset><legend>Split between</legend><label class="everyone"><input type="checkbox" id="everyone" checked> Everyone <span>Equal shares</span></label><div id="participants" class="participants"></div></fieldset>
+        <p id="expense-error" class="error" role="alert" hidden></p>
+        <button class="primary expense-submit" type="submit"><span aria-hidden="true">＋</span> Add expense</button>
+      </form>
+      <div class="expense-history"><div class="subheading">THE RUNNING TAB <span id="tab-count">0 expenses</span></div><div id="expense-list"></div></div>
+    </section>
+    <section class="card settlement" aria-labelledby="settle-title">
+      <div class="card-heading"><span class="section-icon" aria-hidden="true">⇄</span><div><h2 id="settle-title">Settle up</h2><p>A few payments. Everyone's square.</p></div><span class="step">03</span></div>
+      <div id="settlements" aria-live="polite"></div>
+      <div class="settle-note"><span aria-hidden="true">✓</span> Fewer transfers, more time together.</div>
+    </section>
+    <footer><span class="footer-brand">SplitSquad</span><span>Built live by ClawBox AI</span></footer>
+  </main>
+</body>
+</html>
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal } from '../logic.js';
+const people = ['A', 'B', 'C'];
+const expense = (amount, paidBy = 'A', participants = people) => ({ amount, paidBy, participants });
+
+test('splits cents exactly, assigning leftovers in participant order', () => {
+  assert.deepEqual(splitExpense(1000, people), { A: 334, B: 333, C: 333 });
+  assert.deepEqual(splitExpense(2, ['C', 'A', 'B']), { C: 1, A: 1, B: 0 });
+  assert.deepEqual(splitExpense(99, ['A']), { A: 99 });
+});
+test('rejects invalid splits', () => {
+  for (const amount of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => splitExpense(amount, people));
+  assert.throws(() => splitExpense(100, []));
+  assert.throws(() => splitExpense(100, ['A', 'A']));
+});
+test('computes paid minus share, without changing inputs', () => {
+  const expenses = [expense(3000)];
+  const before = JSON.stringify(expenses);
+  assert.deepEqual(computeBalances(people, expenses), { A: 2000, B: -1000, C: -1000 });
+  assert.equal(JSON.stringify(expenses), before);
+  assert.deepEqual(computeBalances([], []), {});
+});
+test('subset sharing leaves uninvolved people unchanged', () => {
+  assert.deepEqual(computeBalances(people, [expense(1001, 'B', ['B', 'C'])]), { A: 0, B: 500, C: -500 });
+});
+test('payer can cover an expense without sharing it', () => {
+  assert.deepEqual(computeBalances(people, [expense(1000, 'A', ['B', 'C'])]), { A: 1000, B: -500, C: -500 });
+});
+test('settlement has expected two payments for a $30 shared expense', () => {
+  assert.deepEqual(settle(computeBalances(people, [expense(3000)])), [
+    { from: 'B', to: 'A', amount: 1000 }, { from: 'C', to: 'A', amount: 1000 },
+  ]);
+});
+test('empty, even, and two-person settlements', () => {
+  assert.deepEqual(settle({}), []);
+  assert.deepEqual(settle({ A: 0, B: 0 }), []);
+  assert.deepEqual(settle({ A: -57, B: 57 }), [{ from: 'A', to: 'B', amount: 57 }]);
+});
+test('greedy matching selects the biggest remaining debtor and creditor', () => {
+  const balances = { A: -600, B: -400, C: 500, D: 300, E: 200 };
+  const before = { ...balances };
+  assert.deepEqual(settle(balances), [
+    { from: 'A', to: 'C', amount: 500 },
+    { from: 'B', to: 'D', amount: 300 },
+    { from: 'B', to: 'E', amount: 100 },
+    { from: 'A', to: 'E', amount: 100 },
+  ]);
+  assert.deepEqual(balances, before);
+});
+test('many varied trips conserve cents and settle within n−1 payments', () => {
+  for (let n = 2; n <= 16; n++) {
+    const members = Array.from({ length: n }, (_, index) => `P${index}`);
+    const expenses = Array.from({ length: 45 }, (_, i) => expense(1 + ((i * 997 + n * 23) % 10000), members[i % n], members.filter((_, j) => (i + j) % 3 !== 0)));
+    const balances = computeBalances(members, expenses);
+    assert.equal(Object.values(balances).reduce((a, b) => a + b, 0), 0);
+    const transfers = settle(balances);
+    assert.ok(transfers.length <= n - 1);
+    const result = { ...balances };
+    for (const transfer of transfers) {
+      assert.ok(Number.isSafeInteger(transfer.amount) && transfer.amount > 0);
+      result[transfer.from] += transfer.amount;
+      result[transfer.to] -= transfer.amount;
+    }
+    assert.ok(Object.values(result).every(value => value === 0));
+  }
+});
+test('parses dollar amounts without floating point rounding', () => {
+  assert.equal(parseAmount('10.01'), 1001);
+  assert.equal(parseAmount(' 0.29 '), 29);
+  assert.equal(parseAmount('30'), 3000);
+  assert.equal(parseAmount('1.5'), 150);
+  for (const value of ['', '0', '-3', 'NaN', 'Infinity', '1e3', '1.005', 'abc', '9007199254740992']) assert.throws(() => parseAmount(value));
+});
+test('names are trimmed and reject blanks or case-insensitive duplicates', () => {
+  assert.equal(validateName('  Alex  ', []), 'Alex');
+  assert.throws(() => validateName(' ', []));
+  assert.throws(() => validateName(' alex ', ['Alex']));
+});
+test('removal protects payers and participants', () => {
+  const expenses = [expense(100, 'A', ['B'])];
+  assert.equal(canRemovePerson('A', expenses), false);
+  assert.equal(canRemovePerson('B', expenses), false);
+  assert.equal(canRemovePerson('C', expenses), true);
+  assert.equal(canRemovePerson('A', []), true);
+});
+test('unsafe totals and malformed balance data are rejected', () => {
+  assert.equal(tripTotal([expense(3000), expense(1001)]), 4001);
+  assert.throws(() => tripTotal([expense(Number.MAX_SAFE_INTEGER), expense(1)]));
+  assert.throws(() => computeBalances(people, [expense(100, 'Unknown')]));
+  assert.throws(() => computeBalances(people, [expense(100, 'A', ['Unknown'])]));
+  assert.throws(() => settle({ A: 1, B: 0 }));
+  assert.throws(() => settle({ A: 0.5, B: -0.5 }));
+});
+test('names that match object properties work as ordinary names', () => {
+  const names = ['__proto__', 'constructor'];
+  assert.deepEqual(computeBalances(names, [expense(100, '__proto__', names)]), { ['__proto__']: 50, constructor: -50 });
+});
+{"name":"splitsquad","private":true,"type":"module","scripts":{"test":"node --test tests/"}}
+# SplitSquad
+
+## Purpose
+SplitSquad lets a group of friends log shared trip expenses and see the balances right away.
+It shows who owes whom using as few payments as possible, so everyone can settle up quickly.
+
+## Features
+- **People:** add or remove trip members by name. Duplicate and blank names are rejected. A person who appears in an expense can't be removed.
+- **Expenses:** add an expense with a description, an amount, who paid, and who shares it (everyone by default, or tick specific people). Expenses can be deleted.
+- **Balances:** each person's net balance (paid minus share), shown in green for positive and red for negative. All amounts are calculated in integer cents so nothing is lost to rounding.
+- **Settle up:** a short list of payments in the form "A → B: $X". It uses greedy matching (biggest debtor pays biggest creditor), so it never needs more than n−1 payments.
+- **Persistence:** everything is saved to localStorage automatically and restored on reload. A "Reset trip" button clears it after a confirmation.
+- **Totals:** the total trip spend and the cost per person are shown at the top.
+
+## UI notes
+- Mobile-first, single column, max width about 480px and centred on desktop. Tap targets are at least 44px.
+- Modern card layout: soft shadows, 16px rounded corners, system font stack, and one accent colour (teal/indigo gradient header).
+- Three stacked cards: **People** (chips with a × button), **Expenses** (form plus list), **Settle up** (payment rows with arrows).
+- Empty states give friendly hints, e.g. "Add at least 2 people to start".
+- Supports dark mode through `prefers-color-scheme`. Inputs have visible focus rings and every control has an accessible label.
+
+## Acceptance criteria
+1. `splitExpense(1000, ['A','B','C'])` returns shares that add up to exactly 1000 cents. They are 334/333/333, with leftover cents going to the first participants in a fixed order.
+2. `computeBalances(people, expenses)` returns balances that always sum to 0. For example, A pays 3000 for A, B and C, which gives A: +2000, B: −1000, C: −1000.
+3. `settle(balances)` returns transfers that bring every balance to 0. There are never more than n−1 of them, and every amount is a positive integer.
+4. When everyone is already even, `settle` returns an empty array. A two-person debt produces exactly one transfer.
+5. An expense shared only by a subset of people (e.g. B and C) does not change the balance of anyone outside that subset.
+6. In the UI, adding 3 people and one $30 expense paid by the first person immediately shows two "→ $10.00" payments in Settle up.
+7. Reloading the page keeps the same people, expenses and payments. Clicking "Reset trip" and confirming clears all of them.
+8. Invalid input is rejected with an inline message: an amount ≤ 0 or not a number, no participants selected, or a blank or duplicate name.
+
+## Tech constraints
+- Static site, files `index.html` + `style.css` + `app.js` + `logic.js`.
+- Pure functions in `logic.js` as an ES module usable from Node.
+- No build step, no CDN frameworks, no API keys.
+- Tests in `tests/logic.test.mjs` using `node:test` + `node:assert`.
+- Data persisted in localStorage if needed.
+
+exec
+/bin/bash -lc 'for dir in / /home /home/clawbox /home/clawbox/expo-demo /home/clawbox/expo-demo/runs /home/clawbox/expo-demo/runs/20261006-233530-fix /home/clawbox/expo-demo/runs/20261006-233530-fix/repo; do if [ -f "$dir/AGENTS.md" ]; then cat "$dir/AGENTS.md"; fi; done; rg --files -g '"'AGENTS.md' -g '*playwright*'; cat tests/index.js; command -v chromium || command -v google-chrome" in /home/clawbox/expo-demo/runs/20261006-233530-fix/repo
+ succeeded in 0ms:
+// Directory entry point for `node --test tests/` on Node versions that resolve it as a module.
+import './logic.test.mjs';
+/snap/bin/chromium
+
+exec
+/bin/bash -lc "ls /tmp /home/clawbox; npm root -g; rg --files /home/clawbox -g 'package.json' -g '*playwright*' -g '*puppeteer*' --hidden 2>/dev/null | head -50" in /home/clawbox/expo-demo/runs/20261006-233530-fix/repo
+ succeeded in 46ms:
+/home/clawbox/.npm-global/lib/node_modules
+/home/clawbox/.local/bin/playwright
+/home/clawbox/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/fakechat/package.json
+/home/clawbox/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/discord/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/node_modules/@pnpm/exe.linux-arm64/package.json
+/home/clawbox/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/fdir/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/yallist/dist/esm/package.json
+/home/clawbox/.npm/_npx/4c14ca9d614c46a6/node_modules/chrome-devtools-mcp/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/yallist/dist/commonjs/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/yallist/package.json
+/home/clawbox/.npm/_npx/4c14ca9d614c46a6/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/graceful-fs/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/nopt/package.json
+/home/clawbox/.npm/_npx/fd45a72a545557e9/node_modules/@esbuild/linux-arm64/package.json
+/home/clawbox/.npm/_npx/fd45a72a545557e9/node_modules/esbuild/package.json
+/home/clawbox/.npm/_npx/fd45a72a545557e9/node_modules/tsx/package.json
+/home/clawbox/.npm/_npx/fd45a72a545557e9/package.json
+/home/clawbox/expo-demo/runs/20261006-232707-app/app/package.json
+/home/clawbox/.npm/_npx/1d6e82a4126006c4/node_modules/tsc/package.json
+/home/clawbox/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/imessage/package.json
+/home/clawbox/.npm/_npx/1d6e82a4126006c4/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/node-gyp/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/minipass/dist/esm/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/minipass/dist/commonjs/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/minipass/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/picomatch/package.json
+/home/clawbox/expo-demo/runs/20261006-233530-fix/repo/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/get-pnpm/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/which/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/abbrev/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/proc-log/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/chownr/dist/esm/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/chownr/dist/commonjs/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/chownr/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/minizlib/dist/esm/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/minizlib/dist/commonjs/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/minizlib/package.json
+/home/clawbox/.npm/_npx/8718c3904bb5fece/node_modules/@clack/prompts/package.json
+/home/clawbox/.npm/_npx/8718c3904bb5fece/node_modules/@clack/core/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/undici/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/semver/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/tinyglobby/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/isexe/dist/esm/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/isexe/dist/commonjs/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/isexe/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/exponential-backoff/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/@isaacs/fs-minipass/dist/esm/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/@isaacs/fs-minipass/dist/commonjs/package.json
+/home/clawbox/.npm-global/lib/node_modules/pnpm/dist/node_modules/@isaacs/fs-minipass/package.json
+/home/clawbox/.npm/_npx/8718c3904bb5fece/node_modules/pdfjs-dist/package.json
+
+apply patch
+patch: completed
+/home/clawbox/expo-demo/runs/20261006-233530-fix/repo/SPEC.md
+/home/clawbox/expo-demo/runs/20261006-233530-fix/repo/app.js
+/home/clawbox/expo-demo/runs/20261006-233530-fix/repo/index.html
+/home/clawbox/expo-demo/runs/20261006-233530-fix/repo/logic.js
+diff --git a/SPEC.md b/SPEC.md
+index 4386e065bbfd05204e86e415a6ca99f5eef442da..3013a454728f23c123be6669c855fc1c344ae1b3
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -9,6 +9,7 @@
+ - **Expenses:** add an expense with a description, an amount, who paid, and who shares it (everyone by default, or tick specific people). Expenses can be deleted.
+ - **Balances:** each person's net balance (paid minus share), shown in green for positive and red for negative. All amounts are calculated in integer cents so nothing is lost to rounding.
+ - **Settle up:** a short list of payments in the form "A → B: $X". It uses greedy matching (biggest debtor pays biggest creditor), so it never needs more than n−1 payments.
++- **Export CSV:** downloads the current expenses and final settlement as `splitsquad.csv`, with USD amounts to two decimal places and escaped text fields. Empty sections retain their headers.
+ - **Persistence:** everything is saved to localStorage automatically and restored on reload. A "Reset trip" button clears it after a confirmation.
+ - **Totals:** the total trip spend and the cost per person are shown at the top.
+ 
+diff --git a/app.js b/app.js
+index 5c6c8e3e0f4dd4a110b4e557bc6bc830c429d5f1..15745c69d3af6aa120f2f428be283f757ab30fdd
+--- a/app.js
++++ b/app.js
+@@ -1,4 +1,4 @@
+-import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal } from './logic.js';
++import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal, toCSV } from './logic.js';
+ 
+ const $ = id => document.getElementById(id);
+ const STORAGE_KEY = 'splitsquad.v1';
+@@ -189,6 +189,17 @@
+     error('expense-error'); persist(); render();
+   } catch (cause) { error('expense-error', cause.message); }
+ });
++$('export-csv').addEventListener('click', () => {
++  const blob = new Blob([toCSV(state.people, state.expenses)], { type: 'text/csv;charset=utf-8' });
++  const url = URL.createObjectURL(blob);
++  const link = document.createElement('a');
++  link.href = url;
++  link.download = 'splitsquad.csv';
++  document.body.append(link);
++  link.click();
++  link.remove();
++  setTimeout(() => URL.revokeObjectURL(url), 1000);
++});
+ $('reset').addEventListener('click', () => {
+   if (!window.confirm('Reset this trip? All people and expenses will be removed.')) return;
+   state = { people: [], expenses: [] };
+diff --git a/index.html b/index.html
+index bd57af554a5fa3f76fe3efa615982e29bbdf669d..333efefb745d2a28b8c14e8e9d658f441bbae30a
+--- a/index.html
++++ b/index.html
+@@ -43,6 +43,7 @@
+     <section class="card settlement" aria-labelledby="settle-title">
+       <div class="card-heading"><span class="section-icon" aria-hidden="true">⇄</span><div><h2 id="settle-title">Settle up</h2><p>A few payments. Everyone's square.</p></div><span class="step">03</span></div>
+       <div id="settlements" aria-live="polite"></div>
++      <button id="export-csv" class="text-button" type="button">Export CSV</button>
+       <div class="settle-note"><span aria-hidden="true">✓</span> Fewer transfers, more time together.</div>
+     </section>
+     <footer><span class="footer-brand">SplitSquad</span><span>Built live by ClawBox AI</span></footer>
+diff --git a/logic.js b/logic.js
+index a204a14c9dcebc6a03b0077907a4c51bcdbcf190..788a5802c5bf4dcd5a7a24d0cf70acde541978e4
+--- a/logic.js
++++ b/logic.js
+@@ -66,3 +66,23 @@
+   }
+   return transfers;
+ }
++
++function csvCell(value) {
++  return /[,"\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
++}
++
++/** Export expenses and the computed settlement as CSV, with amounts in USD. */
++export function toCSV(people, expenses) {
++  const transfers = settle(computeBalances(people, expenses));
++  const amount = cents => `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
++  const rows = [
++    ['Expenses', '', '', ''],
++    ['Description', 'Amount (USD)', 'Paid by', 'Participants'],
++    ...expenses.map(expense => [expense.description, amount(expense.amount), expense.paidBy, expense.participants.join(', ')]),
++    ['', '', '', ''],
++    ['Settlement', '', '', ''],
++    ['From', 'To', 'Amount (USD)', ''],
++    ...transfers.map(payment => [payment.from, payment.to, amount(payment.amount), '']),
++  ];
++  return rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
++}
+
+diff --git a/SPEC.md b/SPEC.md
+index 4386e065bbfd05204e86e415a6ca99f5eef442da..3013a454728f23c123be6669c855fc1c344ae1b3
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -9,6 +9,7 @@
+ - **Expenses:** add an expense with a description, an amount, who paid, and who shares it (everyone by default, or tick specific people). Expenses can be deleted.
+ - **Balances:** each person's net balance (paid minus share), shown in green for positive and red for negative. All amounts are calculated in integer cents so nothing is lost to rounding.
+ - **Settle up:** a short list of payments in the form "A → B: $X". It uses greedy matching (biggest debtor pays biggest creditor), so it never needs more than n−1 payments.
++- **Export CSV:** downloads the current expenses and final settlement as `splitsquad.csv`, with USD amounts to two decimal places and escaped text fields. Empty sections retain their headers.
+ - **Persistence:** everything is saved to localStorage automatically and restored on reload. A "Reset trip" button clears it after a confirmation.
+ - **Totals:** the total trip spend and the cost per person are shown at the top.
+ 
+diff --git a/app.js b/app.js
+index 5c6c8e3e0f4dd4a110b4e557bc6bc830c429d5f1..15745c69d3af6aa120f2f428be283f757ab30fdd
+--- a/app.js
++++ b/app.js
+@@ -1,4 +1,4 @@
+-import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal } from './logic.js';
++import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal, toCSV } from './logic.js';
+ 
+ const $ = id => document.getElementById(id);
+ const STORAGE_KEY = 'splitsquad.v1';
+@@ -189,6 +189,17 @@
+     error('expense-error'); persist(); render();
+   } catch (cause) { error('expense-error', cause.message); }
+ });
++$('export-csv').addEventListener('click', () => {
++  const blob = new Blob([toCSV(state.people, state.expenses)], { type: 'text/csv;charset=utf-8' });
++  const url = URL.createObjectURL(blob);
++  const link = document.createElement('a');
++  link.href = url;
++  link.download = 'splitsquad.csv';
++  document.body.append(link);
++  link.click();
++  link.remove();
++  setTimeout(() => URL.revokeObjectURL(url), 1000);
++});
+ $('reset').addEventListener('click', () => {
+   if (!window.confirm('Reset this trip? All people and expenses will be removed.')) return;
+   state = { people: [], expenses: [] };
+diff --git a/index.html b/index.html
+index bd57af554a5fa3f76fe3efa615982e29bbdf669d..333efefb745d2a28b8c14e8e9d658f441bbae30a
+--- a/index.html
++++ b/index.html
+@@ -43,6 +43,7 @@
+     <section class="card settlement" aria-labelledby="settle-title">
+       <div class="card-heading"><span class="section-icon" aria-hidden="true">⇄</span><div><h2 id="settle-title">Settle up</h2><p>A few payments. Everyone's square.</p></div><span class="step">03</span></div>
+       <div id="settlements" aria-live="polite"></div>
++      <button id="export-csv" class="text-button" type="button">Export CSV</button>
+       <div class="settle-note"><span aria-hidden="true">✓</span> Fewer transfers, more time together.</div>
+     </section>
+     <footer><span class="footer-brand">SplitSquad</span><span>Built live by ClawBox AI</span></footer>
+diff --git a/logic.js b/logic.js
+index a204a14c9dcebc6a03b0077907a4c51bcdbcf190..788a5802c5bf4dcd5a7a24d0cf70acde541978e4
+--- a/logic.js
++++ b/logic.js
+@@ -66,3 +66,23 @@
+   }
+   return transfers;
+ }
++
++function csvCell(value) {
++  return /[,"\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
++}
++
++/** Export expenses and the computed settlement as CSV, with amounts in USD. */
++export function toCSV(people, expenses) {
++  const transfers = settle(computeBalances(people, expenses));
++  const amount = cents => `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
++  const rows = [
++    ['Expenses', '', '', ''],
++    ['Description', 'Amount (USD)', 'Paid by', 'Participants'],
++    ...expenses.map(expense => [expense.description, amount(expense.amount), expense.paidBy, expense.participants.join(', ')]),
++    ['', '', '', ''],
++    ['Settlement', '', '', ''],
++    ['From', 'To', 'Amount (USD)', ''],
++    ...transfers.map(payment => [payment.from, payment.to, amount(payment.amount), '']),
++  ];
++  return rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
++}
+
+codex
+The export now uses the same balance and settlement functions as the screen. It includes both sections, USD amounts with two decimal places, and CSV escaping for commas, quotes, and line breaks. I’m adding regression tests and checking the download in Chromium.
+apply patch
+patch: completed
+/home/clawbox/expo-demo/runs/20261006-233530-fix/repo/tests/logic.test.mjs
+diff --git a/SPEC.md b/SPEC.md
+index 4386e065bbfd05204e86e415a6ca99f5eef442da..3013a454728f23c123be6669c855fc1c344ae1b3
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -9,6 +9,7 @@
+ - **Expenses:** add an expense with a description, an amount, who paid, and who shares it (everyone by default, or tick specific people). Expenses can be deleted.
+ - **Balances:** each person's net balance (paid minus share), shown in green for positive and red for negative. All amounts are calculated in integer cents so nothing is lost to rounding.
+ - **Settle up:** a short list of payments in the form "A → B: $X". It uses greedy matching (biggest debtor pays biggest creditor), so it never needs more than n−1 payments.
++- **Export CSV:** downloads the current expenses and final settlement as `splitsquad.csv`, with USD amounts to two decimal places and escaped text fields. Empty sections retain their headers.
+ - **Persistence:** everything is saved to localStorage automatically and restored on reload. A "Reset trip" button clears it after a confirmation.
+ - **Totals:** the total trip spend and the cost per person are shown at the top.
+ 
+diff --git a/app.js b/app.js
+index 5c6c8e3e0f4dd4a110b4e557bc6bc830c429d5f1..15745c69d3af6aa120f2f428be283f757ab30fdd
+--- a/app.js
++++ b/app.js
+@@ -1,4 +1,4 @@
+-import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal } from './logic.js';
++import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal, toCSV } from './logic.js';
+ 
+ const $ = id => document.getElementById(id);
+ const STORAGE_KEY = 'splitsquad.v1';
+@@ -189,6 +189,17 @@
+     error('expense-error'); persist(); render();
+   } catch (cause) { error('expense-error', cause.message); }
+ });
++$('export-csv').addEventListener('click', () => {
++  const blob = new Blob([toCSV(state.people, state.expenses)], { type: 'text/csv;charset=utf-8' });
++  const url = URL.createObjectURL(blob);
++  const link = document.createElement('a');
++  link.href = url;
++  link.download = 'splitsquad.csv';
++  document.body.append(link);
++  link.click();
++  link.remove();
++  setTimeout(() => URL.revokeObjectURL(url), 1000);
++});
+ $('reset').addEventListener('click', () => {
+   if (!window.confirm('Reset this trip? All people and expenses will be removed.')) return;
+   state = { people: [], expenses: [] };
+diff --git a/index.html b/index.html
+index bd57af554a5fa3f76fe3efa615982e29bbdf669d..333efefb745d2a28b8c14e8e9d658f441bbae30a
+--- a/index.html
++++ b/index.html
+@@ -43,6 +43,7 @@
+     <section class="card settlement" aria-labelledby="settle-title">
+       <div class="card-heading"><span class="section-icon" aria-hidden="true">⇄</span><div><h2 id="settle-title">Settle up</h2><p>A few payments. Everyone's square.</p></div><span class="step">03</span></div>
+       <div id="settlements" aria-live="polite"></div>
++      <button id="export-csv" class="text-button" type="button">Export CSV</button>
+       <div class="settle-note"><span aria-hidden="true">✓</span> Fewer transfers, more time together.</div>
+     </section>
+     <footer><span class="footer-brand">SplitSquad</span><span>Built live by ClawBox AI</span></footer>
+diff --git a/logic.js b/logic.js
+index a204a14c9dcebc6a03b0077907a4c51bcdbcf190..788a5802c5bf4dcd5a7a24d0cf70acde541978e4
+--- a/logic.js
++++ b/logic.js
+@@ -66,3 +66,23 @@
+   }
+   return transfers;
+ }
++
++function csvCell(value) {
++  return /[,"\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
++}
++
++/** Export expenses and the computed settlement as CSV, with amounts in USD. */
++export function toCSV(people, expenses) {
++  const transfers = settle(computeBalances(people, expenses));
++  const amount = cents => `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
++  const rows = [
++    ['Expenses', '', '', ''],
++    ['Description', 'Amount (USD)', 'Paid by', 'Participants'],
++    ...expenses.map(expense => [expense.description, amount(expense.amount), expense.paidBy, expense.participants.join(', ')]),
++    ['', '', '', ''],
++    ['Settlement', '', '', ''],
++    ['From', 'To', 'Amount (USD)', ''],
++    ...transfers.map(payment => [payment.from, payment.to, amount(payment.amount), '']),
++  ];
++  return rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
++}
+diff --git a/tests/logic.test.mjs b/tests/logic.test.mjs
+index 90d6e1a230cb4030f01de282821769cb1b7157f2..a8e9dcc60f33b0cc3626821c53ee7c030507b067
+--- a/tests/logic.test.mjs
++++ b/tests/logic.test.mjs
+@@ -1,9 +1,63 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+-import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal } from '../logic.js';
++import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal, toCSV } from '../logic.js';
+ const people = ['A', 'B', 'C'];
+ const expense = (amount, paidBy = 'A', participants = people) => ({ amount, paidBy, participants });
+ 
++test('CSV exports expenses and final settlement with exact cents without mutating inputs', () => {
++  const expenses = [
++    { ...expense(1001), description: 'Dinner' },
++    { ...expense(2, 'B', ['B', 'C']), description: 'Tip' },
++  ];
++  const before = structuredClone({ people, expenses });
++  const expected = [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    'Dinner,10.01,A,"A, B, C"',
++    'Tip,0.02,B,"B, C"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    'C,A,3.34,',
++    'B,A,3.33,',
++    '',
++  ].join('\r\n');
++  assert.equal(toCSV(people, expenses), expected);
++  assert.equal(toCSV(people, expenses), expected);
++  assert.deepEqual({ people, expenses }, before);
++});
++
++test('CSV escapes commas, quotes, CR and LF in expenses and settlement names', () => {
++  const names = ['Zoë, "Z"', '李\nB'];
++  const expenses = [{ ...expense(201, names[0], names), description: 'Lunch, "special"\r\nTakeaway' }];
++  assert.equal(toCSV(names, expenses), [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    '"Lunch, ""special""\r\nTakeaway",2.01,"Zoë, ""Z""","Zoë, ""Z"", 李\nB"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    '"李\nB","Zoë, ""Z""",1.00,',
++    '',
++  ].join('\r\n'));
++  assert.ok(toCSV(['A\rB'], [{ ...expense(1, 'A\rB', ['A\rB']), description: 'Fare' }]).includes('Fare,0.01,"A\rB","A\rB"\r\n'));
++});
++
++test('CSV keeps headers for empty trips and omits transfers when already settled', () => {
++  const headers = 'Expenses,,,\r\nDescription,Amount (USD),Paid by,Participants\r\n';
++  const settlement = ',,,\r\nSettlement,,,\r\nFrom,To,Amount (USD),\r\n';
++  assert.equal(toCSV([], []), headers + settlement);
++  assert.equal(toCSV(people, []), headers + settlement);
++  assert.equal(toCSV(['A'], [{ ...expense(100, 'A', ['A']), description: 'Coffee' }]), headers + 'Coffee,1.00,A,A\r\n' + settlement);
++});
++
++test('CSV preserves precision at the largest supported cent amount', () => {
++  const expenses = [{ ...expense(Number.MAX_SAFE_INTEGER, 'A', ['B']), description: 'Total' }];
++  const csv = toCSV(['A', 'B'], expenses);
++  assert.ok(csv.includes('Total,90071992547409.91,A,B\r\n'));
++  assert.ok(csv.endsWith('B,A,90071992547409.91,\r\n'));
++});
++
+ test('splits cents exactly, assigning leftovers in participant order', () => {
+   assert.deepEqual(splitExpense(1000, people), { A: 334, B: 333, C: 333 });
+   assert.deepEqual(splitExpense(2, ['C', 'A', 'B']), { C: 1, A: 1, B: 0 });
+
+exec
+/bin/bash -lc "npm test; rg --files --hidden --no-ignore /home/clawbox/.npm /home/clawbox/.npm-global -g 'package.json' 2>/dev/null | rg '/(playwright|playwright-core|puppeteer|puppeteer-core)/package.json"'$'"'" in /home/clawbox/expo-demo/runs/20261006-233530-fix/repo
+ succeeded in 769ms:
+
+> test
+> node --test tests/
+
+✔ CSV exports expenses and final settlement with exact cents without mutating inputs (6.149816ms)
+✔ CSV escapes commas, quotes, CR and LF in expenses and settlement names (0.867546ms)
+✔ CSV keeps headers for empty trips and omits transfers when already settled (0.513872ms)
+✔ CSV preserves precision at the largest supported cent amount (0.51736ms)
+✔ splits cents exactly, assigning leftovers in participant order (0.435405ms)
+✔ rejects invalid splits (0.718198ms)
+✔ computes paid minus share, without changing inputs (0.457102ms)
+✔ subset sharing leaves uninvolved people unchanged (0.336074ms)
+✔ payer can cover an expense without sharing it (0.409516ms)
+✔ settlement has expected two payments for a $30 shared expense (0.644179ms)
+✔ empty, even, and two-person settlements (0.414189ms)
+✔ greedy matching selects the biggest remaining debtor and creditor (0.436365ms)
+✔ many varied trips conserve cents and settle within n−1 payments (9.547549ms)
+✔ parses dollar amounts without floating point rounding (0.925339ms)
+✔ names are trimmed and reject blanks or case-insensitive duplicates (0.430541ms)
+✔ removal protects payers and participants (0.373483ms)
+✔ unsafe totals and malformed balance data are rejected (0.764055ms)
+✔ names that match object properties work as ordinary names (0.331466ms)
+ℹ tests 18
+ℹ suites 0
+ℹ pass 18
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 144.915238
+/home/clawbox/.npm-global/lib/node_modules/openclaw/node_modules/playwright-core/package.json
+/home/clawbox/.npm/_npx/8718c3904bb5fece/node_modules/playwright-core/package.json
+
+diff --git a/SPEC.md b/SPEC.md
+index 4386e065bbfd05204e86e415a6ca99f5eef442da..3013a454728f23c123be6669c855fc1c344ae1b3
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -9,6 +9,7 @@
+ - **Expenses:** add an expense with a description, an amount, who paid, and who shares it (everyone by default, or tick specific people). Expenses can be deleted.
+ - **Balances:** each person's net balance (paid minus share), shown in green for positive and red for negative. All amounts are calculated in integer cents so nothing is lost to rounding.
+ - **Settle up:** a short list of payments in the form "A → B: $X". It uses greedy matching (biggest debtor pays biggest creditor), so it never needs more than n−1 payments.
++- **Export CSV:** downloads the current expenses and final settlement as `splitsquad.csv`, with USD amounts to two decimal places and escaped text fields. Empty sections retain their headers.
+ - **Persistence:** everything is saved to localStorage automatically and restored on reload. A "Reset trip" button clears it after a confirmation.
+ - **Totals:** the total trip spend and the cost per person are shown at the top.
+ 
+diff --git a/app.js b/app.js
+index 5c6c8e3e0f4dd4a110b4e557bc6bc830c429d5f1..15745c69d3af6aa120f2f428be283f757ab30fdd
+--- a/app.js
++++ b/app.js
+@@ -1,4 +1,4 @@
+-import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal } from './logic.js';
++import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal, toCSV } from './logic.js';
+ 
+ const $ = id => document.getElementById(id);
+ const STORAGE_KEY = 'splitsquad.v1';
+@@ -189,6 +189,17 @@
+     error('expense-error'); persist(); render();
+   } catch (cause) { error('expense-error', cause.message); }
+ });
++$('export-csv').addEventListener('click', () => {
++  const blob = new Blob([toCSV(state.people, state.expenses)], { type: 'text/csv;charset=utf-8' });
++  const url = URL.createObjectURL(blob);
++  const link = document.createElement('a');
++  link.href = url;
++  link.download = 'splitsquad.csv';
++  document.body.append(link);
++  link.click();
++  link.remove();
++  setTimeout(() => URL.revokeObjectURL(url), 1000);
++});
+ $('reset').addEventListener('click', () => {
+   if (!window.confirm('Reset this trip? All people and expenses will be removed.')) return;
+   state = { people: [], expenses: [] };
+diff --git a/index.html b/index.html
+index bd57af554a5fa3f76fe3efa615982e29bbdf669d..333efefb745d2a28b8c14e8e9d658f441bbae30a
+--- a/index.html
++++ b/index.html
+@@ -43,6 +43,7 @@
+     <section class="card settlement" aria-labelledby="settle-title">
+       <div class="card-heading"><span class="section-icon" aria-hidden="true">⇄</span><div><h2 id="settle-title">Settle up</h2><p>A few payments. Everyone's square.</p></div><span class="step">03</span></div>
+       <div id="settlements" aria-live="polite"></div>
++      <button id="export-csv" class="text-button" type="button">Export CSV</button>
+       <div class="settle-note"><span aria-hidden="true">✓</span> Fewer transfers, more time together.</div>
+     </section>
+     <footer><span class="footer-brand">SplitSquad</span><span>Built live by ClawBox AI</span></footer>
+diff --git a/logic.js b/logic.js
+index a204a14c9dcebc6a03b0077907a4c51bcdbcf190..788a5802c5bf4dcd5a7a24d0cf70acde541978e4
+--- a/logic.js
++++ b/logic.js
+@@ -66,3 +66,23 @@
+   }
+   return transfers;
+ }
++
++function csvCell(value) {
++  return /[,"\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
++}
++
++/** Export expenses and the computed settlement as CSV, with amounts in USD. */
++export function toCSV(people, expenses) {
++  const transfers = settle(computeBalances(people, expenses));
++  const amount = cents => `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
++  const rows = [
++    ['Expenses', '', '', ''],
++    ['Description', 'Amount (USD)', 'Paid by', 'Participants'],
++    ...expenses.map(expense => [expense.description, amount(expense.amount), expense.paidBy, expense.participants.join(', ')]),
++    ['', '', '', ''],
++    ['Settlement', '', '', ''],
++    ['From', 'To', 'Amount (USD)', ''],
++    ...transfers.map(payment => [payment.from, payment.to, amount(payment.amount), '']),
++  ];
++  return rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
++}
+diff --git a/tests/logic.test.mjs b/tests/logic.test.mjs
+index 90d6e1a230cb4030f01de282821769cb1b7157f2..a8e9dcc60f33b0cc3626821c53ee7c030507b067
+--- a/tests/logic.test.mjs
++++ b/tests/logic.test.mjs
+@@ -1,9 +1,63 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+-import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal } from '../logic.js';
++import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal, toCSV } from '../logic.js';
+ const people = ['A', 'B', 'C'];
+ const expense = (amount, paidBy = 'A', participants = people) => ({ amount, paidBy, participants });
+ 
++test('CSV exports expenses and final settlement with exact cents without mutating inputs', () => {
++  const expenses = [
++    { ...expense(1001), description: 'Dinner' },
++    { ...expense(2, 'B', ['B', 'C']), description: 'Tip' },
++  ];
++  const before = structuredClone({ people, expenses });
++  const expected = [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    'Dinner,10.01,A,"A, B, C"',
++    'Tip,0.02,B,"B, C"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    'C,A,3.34,',
++    'B,A,3.33,',
++    '',
++  ].join('\r\n');
++  assert.equal(toCSV(people, expenses), expected);
++  assert.equal(toCSV(people, expenses), expected);
++  assert.deepEqual({ people, expenses }, before);
++});
++
++test('CSV escapes commas, quotes, CR and LF in expenses and settlement names', () => {
++  const names = ['Zoë, "Z"', '李\nB'];
++  const expenses = [{ ...expense(201, names[0], names), description: 'Lunch, "special"\r\nTakeaway' }];
++  assert.equal(toCSV(names, expenses), [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    '"Lunch, ""special""\r\nTakeaway",2.01,"Zoë, ""Z""","Zoë, ""Z"", 李\nB"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    '"李\nB","Zoë, ""Z""",1.00,',
++    '',
++  ].join('\r\n'));
++  assert.ok(toCSV(['A\rB'], [{ ...expense(1, 'A\rB', ['A\rB']), description: 'Fare' }]).includes('Fare,0.01,"A\rB","A\rB"\r\n'));
++});
++
++test('CSV keeps headers for empty trips and omits transfers when already settled', () => {
++  const headers = 'Expenses,,,\r\nDescription,Amount (USD),Paid by,Participants\r\n';
++  const settlement = ',,,\r\nSettlement,,,\r\nFrom,To,Amount (USD),\r\n';
++  assert.equal(toCSV([], []), headers + settlement);
++  assert.equal(toCSV(people, []), headers + settlement);
++  assert.equal(toCSV(['A'], [{ ...expense(100, 'A', ['A']), description: 'Coffee' }]), headers + 'Coffee,1.00,A,A\r\n' + settlement);
++});
++
++test('CSV preserves precision at the largest supported cent amount', () => {
++  const expenses = [{ ...expense(Number.MAX_SAFE_INTEGER, 'A', ['B']), description: 'Total' }];
++  const csv = toCSV(['A', 'B'], expenses);
++  assert.ok(csv.includes('Total,90071992547409.91,A,B\r\n'));
++  assert.ok(csv.endsWith('B,A,90071992547409.91,\r\n'));
++});
++
+ test('splits cents exactly, assigning leftovers in participant order', () => {
+   assert.deepEqual(splitExpense(1000, people), { A: 334, B: 333, C: 333 });
+   assert.deepEqual(splitExpense(2, ['C', 'A', 'B']), { C: 1, A: 1, B: 0 });
+
+exec
+/bin/bash -lc "node --input-type=module <<'JS'
+import { chromium } from '/home/clawbox/.npm-global/lib/node_modules/openclaw/node_modules/playwright-core/index.mjs';
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+import { toCSV } from './logic.js';
+const server = createServer(async (req, res) => {
+  try {
+    const path = req.url === '/' ? '/index.html' : req.url;
+    res.setHeader('Content-Type', path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : 'text/html');
+    res.end(await readFile("'`${process.cwd()}${path}`));
+  } catch { res.writeHead(404).end(); }
+});
+await new Promise(resolve => server.listen(0, '"'127.0.0.1', resolve));
+let browser;
+try {
+  browser = await chromium.launch({ executablePath: '/snap/bin/chromium', headless: true, args: ['--no-sandbox'] });
+  const page = await browser.newPage({ acceptDownloads: true });
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto("'`http://127.0.0.1:${server.address().port}`);
+  for (const name of ['"'Alice', 'Bob']) {
+    await page.locator('#person-name').fill(name);
+    await page.locator('#person-form button').click();
+  }
+  async function checkDownload(expectedPayments) {
+    assert.deepEqual(await page.locator('#settlements .payment').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label'))), expectedPayments);
+    const pending = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Export CSV', exact: true }).click();
+    const download = await pending;
+    assert.equal(download.suggestedFilename(), 'splitsquad.csv');
+    const state = await page.evaluate(() => JSON.parse(localStorage.getItem('splitsquad.v1')));
+    assert.equal(await readFile(await download.path(), 'utf8'), toCSV(state.people, state.expenses));
+    assert.equal(await page.locator('a[download]').count(), 0);
+  }
+  await checkDownload([]);
+  await page.locator('#description').fill('Dinner, \"shared\"');
+  await page.locator('#amount').fill('10.01');
+  await page.locator('#expense-form button').click();
+  await checkDownload(['Bob pays Alice "'$5.00'"']);
+  await page.locator('#description').fill('Coffee');
+  await page.locator('#amount').fill('2');
+  await page.locator('#payer').selectOption('Bob');
+  await page.locator('#expense-form button').click();
+  await checkDownload(['Bob pays Alice "'$4.00'"']);
+  assert.deepEqual(errors, []);
+  console.log('Chromium download checks passed: empty trip, escaped expense, updated expenses and displayed settlement.');
+} finally {
+  await browser?.close();
+  await new Promise(resolve => server.close(resolve));
+}
+JS
+
+git diff --check; git diff --stat" in /home/clawbox/expo-demo/runs/20261006-233530-fix/repo
+diff --git a/SPEC.md b/SPEC.md
+index 4386e065bbfd05204e86e415a6ca99f5eef442da..3013a454728f23c123be6669c855fc1c344ae1b3
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -9,6 +9,7 @@
+ - **Expenses:** add an expense with a description, an amount, who paid, and who shares it (everyone by default, or tick specific people). Expenses can be deleted.
+ - **Balances:** each person's net balance (paid minus share), shown in green for positive and red for negative. All amounts are calculated in integer cents so nothing is lost to rounding.
+ - **Settle up:** a short list of payments in the form "A → B: $X". It uses greedy matching (biggest debtor pays biggest creditor), so it never needs more than n−1 payments.
++- **Export CSV:** downloads the current expenses and final settlement as `splitsquad.csv`, with USD amounts to two decimal places and escaped text fields. Empty sections retain their headers.
+ - **Persistence:** everything is saved to localStorage automatically and restored on reload. A "Reset trip" button clears it after a confirmation.
+ - **Totals:** the total trip spend and the cost per person are shown at the top.
+ 
+diff --git a/app.js b/app.js
+index 5c6c8e3e0f4dd4a110b4e557bc6bc830c429d5f1..15745c69d3af6aa120f2f428be283f757ab30fdd
+--- a/app.js
++++ b/app.js
+@@ -1,4 +1,4 @@
+-import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal } from './logic.js';
++import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal, toCSV } from './logic.js';
+ 
+ const $ = id => document.getElementById(id);
+ const STORAGE_KEY = 'splitsquad.v1';
+@@ -189,6 +189,17 @@
+     error('expense-error'); persist(); render();
+   } catch (cause) { error('expense-error', cause.message); }
+ });
++$('export-csv').addEventListener('click', () => {
++  const blob = new Blob([toCSV(state.people, state.expenses)], { type: 'text/csv;charset=utf-8' });
++  const url = URL.createObjectURL(blob);
++  const link = document.createElement('a');
++  link.href = url;
++  link.download = 'splitsquad.csv';
++  document.body.append(link);
++  link.click();
++  link.remove();
++  setTimeout(() => URL.revokeObjectURL(url), 1000);
++});
+ $('reset').addEventListener('click', () => {
+   if (!window.confirm('Reset this trip? All people and expenses will be removed.')) return;
+   state = { people: [], expenses: [] };
+diff --git a/index.html b/index.html
+index bd57af554a5fa3f76fe3efa615982e29bbdf669d..333efefb745d2a28b8c14e8e9d658f441bbae30a
+--- a/index.html
++++ b/index.html
+@@ -43,6 +43,7 @@
+     <section class="card settlement" aria-labelledby="settle-title">
+       <div class="card-heading"><span class="section-icon" aria-hidden="true">⇄</span><div><h2 id="settle-title">Settle up</h2><p>A few payments. Everyone's square.</p></div><span class="step">03</span></div>
+       <div id="settlements" aria-live="polite"></div>
++      <button id="export-csv" class="text-button" type="button">Export CSV</button>
+       <div class="settle-note"><span aria-hidden="true">✓</span> Fewer transfers, more time together.</div>
+     </section>
+     <footer><span class="footer-brand">SplitSquad</span><span>Built live by ClawBox AI</span></footer>
+diff --git a/logic.js b/logic.js
+index a204a14c9dcebc6a03b0077907a4c51bcdbcf190..788a5802c5bf4dcd5a7a24d0cf70acde541978e4
+--- a/logic.js
++++ b/logic.js
+@@ -66,3 +66,23 @@
+   }
+   return transfers;
+ }
++
++function csvCell(value) {
++  return /[,"\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
++}
++
++/** Export expenses and the computed settlement as CSV, with amounts in USD. */
++export function toCSV(people, expenses) {
++  const transfers = settle(computeBalances(people, expenses));
++  const amount = cents => `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
++  const rows = [
++    ['Expenses', '', '', ''],
++    ['Description', 'Amount (USD)', 'Paid by', 'Participants'],
++    ...expenses.map(expense => [expense.description, amount(expense.amount), expense.paidBy, expense.participants.join(', ')]),
++    ['', '', '', ''],
++    ['Settlement', '', '', ''],
++    ['From', 'To', 'Amount (USD)', ''],
++    ...transfers.map(payment => [payment.from, payment.to, amount(payment.amount), '']),
++  ];
++  return rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
++}
+diff --git a/tests/logic.test.mjs b/tests/logic.test.mjs
+index 90d6e1a230cb4030f01de282821769cb1b7157f2..a8e9dcc60f33b0cc3626821c53ee7c030507b067
+--- a/tests/logic.test.mjs
++++ b/tests/logic.test.mjs
+@@ -1,9 +1,63 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+-import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal } from '../logic.js';
++import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal, toCSV } from '../logic.js';
+ const people = ['A', 'B', 'C'];
+ const expense = (amount, paidBy = 'A', participants = people) => ({ amount, paidBy, participants });
+ 
++test('CSV exports expenses and final settlement with exact cents without mutating inputs', () => {
++  const expenses = [
++    { ...expense(1001), description: 'Dinner' },
++    { ...expense(2, 'B', ['B', 'C']), description: 'Tip' },
++  ];
++  const before = structuredClone({ people, expenses });
++  const expected = [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    'Dinner,10.01,A,"A, B, C"',
++    'Tip,0.02,B,"B, C"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    'C,A,3.34,',
++    'B,A,3.33,',
++    '',
++  ].join('\r\n');
++  assert.equal(toCSV(people, expenses), expected);
++  assert.equal(toCSV(people, expenses), expected);
++  assert.deepEqual({ people, expenses }, before);
++});
++
++test('CSV escapes commas, quotes, CR and LF in expenses and settlement names', () => {
++  const names = ['Zoë, "Z"', '李\nB'];
++  const expenses = [{ ...expense(201, names[0], names), description: 'Lunch, "special"\r\nTakeaway' }];
++  assert.equal(toCSV(names, expenses), [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    '"Lunch, ""special""\r\nTakeaway",2.01,"Zoë, ""Z""","Zoë, ""Z"", 李\nB"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    '"李\nB","Zoë, ""Z""",1.00,',
++    '',
++  ].join('\r\n'));
++  assert.ok(toCSV(['A\rB'], [{ ...expense(1, 'A\rB', ['A\rB']), description: 'Fare' }]).includes('Fare,0.01,"A\rB","A\rB"\r\n'));
++});
++
++test('CSV keeps headers for empty trips and omits transfers when already settled', () => {
++  const headers = 'Expenses,,,\r\nDescription,Amount (USD),Paid by,Participants\r\n';
++  const settlement = ',,,\r\nSettlement,,,\r\nFrom,To,Amount (USD),\r\n';
++  assert.equal(toCSV([], []), headers + settlement);
++  assert.equal(toCSV(people, []), headers + settlement);
++  assert.equal(toCSV(['A'], [{ ...expense(100, 'A', ['A']), description: 'Coffee' }]), headers + 'Coffee,1.00,A,A\r\n' + settlement);
++});
++
++test('CSV preserves precision at the largest supported cent amount', () => {
++  const expenses = [{ ...expense(Number.MAX_SAFE_INTEGER, 'A', ['B']), description: 'Total' }];
++  const csv = toCSV(['A', 'B'], expenses);
++  assert.ok(csv.includes('Total,90071992547409.91,A,B\r\n'));
++  assert.ok(csv.endsWith('B,A,90071992547409.91,\r\n'));
++});
++
+ test('splits cents exactly, assigning leftovers in participant order', () => {
+   assert.deepEqual(splitExpense(1000, people), { A: 334, B: 333, C: 333 });
+   assert.deepEqual(splitExpense(2, ['C', 'A', 'B']), { C: 1, A: 1, B: 0 });
+
+ succeeded in 2239ms:
+node:internal/fs/promises:1345
+  return new FileHandle(await PromisePrototypeThen(
+                        ^
+
+Error: ENOENT: no such file or directory, open '/tmp/playwright-artifacts-IDaJj5/b04cb6a9-57e0-4e6f-aabb-2db234dda370'
+    at async open (node:internal/fs/promises:1345:25)
+    at async readFile (node:internal/fs/promises:1996:14)
+    at async checkDownload (file:///home/clawbox/expo-demo/runs/20261006-233530-fix/repo/[eval1]:32:18)
+    at async file:///home/clawbox/expo-demo/runs/20261006-233530-fix/repo/[eval1]:35:3 {
+  errno: -2,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: '/tmp/playwright-artifacts-IDaJj5/b04cb6a9-57e0-4e6f-aabb-2db234dda370'
+}
+
+Node.js v24.21.0
+ SPEC.md              |  1 +
+ app.js               | 13 +++++++++++-
+ index.html           |  1 +
+ logic.js             | 20 +++++++++++++++++++
+ tests/logic.test.mjs | 56 +++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 5 files changed, 89 insertions(+), 2 deletions(-)
+
+diff --git a/SPEC.md b/SPEC.md
+index 4386e065bbfd05204e86e415a6ca99f5eef442da..3013a454728f23c123be6669c855fc1c344ae1b3
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -9,6 +9,7 @@
+ - **Expenses:** add an expense with a description, an amount, who paid, and who shares it (everyone by default, or tick specific people). Expenses can be deleted.
+ - **Balances:** each person's net balance (paid minus share), shown in green for positive and red for negative. All amounts are calculated in integer cents so nothing is lost to rounding.
+ - **Settle up:** a short list of payments in the form "A → B: $X". It uses greedy matching (biggest debtor pays biggest creditor), so it never needs more than n−1 payments.
++- **Export CSV:** downloads the current expenses and final settlement as `splitsquad.csv`, with USD amounts to two decimal places and escaped text fields. Empty sections retain their headers.
+ - **Persistence:** everything is saved to localStorage automatically and restored on reload. A "Reset trip" button clears it after a confirmation.
+ - **Totals:** the total trip spend and the cost per person are shown at the top.
+ 
+diff --git a/app.js b/app.js
+index 5c6c8e3e0f4dd4a110b4e557bc6bc830c429d5f1..15745c69d3af6aa120f2f428be283f757ab30fdd
+--- a/app.js
++++ b/app.js
+@@ -1,4 +1,4 @@
+-import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal } from './logic.js';
++import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal, toCSV } from './logic.js';
+ 
+ const $ = id => document.getElementById(id);
+ const STORAGE_KEY = 'splitsquad.v1';
+@@ -189,6 +189,17 @@
+     error('expense-error'); persist(); render();
+   } catch (cause) { error('expense-error', cause.message); }
+ });
++$('export-csv').addEventListener('click', () => {
++  const blob = new Blob([toCSV(state.people, state.expenses)], { type: 'text/csv;charset=utf-8' });
++  const url = URL.createObjectURL(blob);
++  const link = document.createElement('a');
++  link.href = url;
++  link.download = 'splitsquad.csv';
++  document.body.append(link);
++  link.click();
++  link.remove();
++  setTimeout(() => URL.revokeObjectURL(url), 1000);
++});
+ $('reset').addEventListener('click', () => {
+   if (!window.confirm('Reset this trip? All people and expenses will be removed.')) return;
+   state = { people: [], expenses: [] };
+diff --git a/index.html b/index.html
+index bd57af554a5fa3f76fe3efa615982e29bbdf669d..333efefb745d2a28b8c14e8e9d658f441bbae30a
+--- a/index.html
++++ b/index.html
+@@ -43,6 +43,7 @@
+     <section class="card settlement" aria-labelledby="settle-title">
+       <div class="card-heading"><span class="section-icon" aria-hidden="true">⇄</span><div><h2 id="settle-title">Settle up</h2><p>A few payments. Everyone's square.</p></div><span class="step">03</span></div>
+       <div id="settlements" aria-live="polite"></div>
++      <button id="export-csv" class="text-button" type="button">Export CSV</button>
+       <div class="settle-note"><span aria-hidden="true">✓</span> Fewer transfers, more time together.</div>
+     </section>
+     <footer><span class="footer-brand">SplitSquad</span><span>Built live by ClawBox AI</span></footer>
+diff --git a/logic.js b/logic.js
+index a204a14c9dcebc6a03b0077907a4c51bcdbcf190..788a5802c5bf4dcd5a7a24d0cf70acde541978e4
+--- a/logic.js
++++ b/logic.js
+@@ -66,3 +66,23 @@
+   }
+   return transfers;
+ }
++
++function csvCell(value) {
++  return /[,"\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
++}
++
++/** Export expenses and the computed settlement as CSV, with amounts in USD. */
++export function toCSV(people, expenses) {
++  const transfers = settle(computeBalances(people, expenses));
++  const amount = cents => `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
++  const rows = [
++    ['Expenses', '', '', ''],
++    ['Description', 'Amount (USD)', 'Paid by', 'Participants'],
++    ...expenses.map(expense => [expense.description, amount(expense.amount), expense.paidBy, expense.participants.join(', ')]),
++    ['', '', '', ''],
++    ['Settlement', '', '', ''],
++    ['From', 'To', 'Amount (USD)', ''],
++    ...transfers.map(payment => [payment.from, payment.to, amount(payment.amount), '']),
++  ];
++  return rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
++}
+diff --git a/tests/logic.test.mjs b/tests/logic.test.mjs
+index 90d6e1a230cb4030f01de282821769cb1b7157f2..a8e9dcc60f33b0cc3626821c53ee7c030507b067
+--- a/tests/logic.test.mjs
++++ b/tests/logic.test.mjs
+@@ -1,9 +1,63 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+-import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal } from '../logic.js';
++import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal, toCSV } from '../logic.js';
+ const people = ['A', 'B', 'C'];
+ const expense = (amount, paidBy = 'A', participants = people) => ({ amount, paidBy, participants });
+ 
++test('CSV exports expenses and final settlement with exact cents without mutating inputs', () => {
++  const expenses = [
++    { ...expense(1001), description: 'Dinner' },
++    { ...expense(2, 'B', ['B', 'C']), description: 'Tip' },
++  ];
++  const before = structuredClone({ people, expenses });
++  const expected = [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    'Dinner,10.01,A,"A, B, C"',
++    'Tip,0.02,B,"B, C"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    'C,A,3.34,',
++    'B,A,3.33,',
++    '',
++  ].join('\r\n');
++  assert.equal(toCSV(people, expenses), expected);
++  assert.equal(toCSV(people, expenses), expected);
++  assert.deepEqual({ people, expenses }, before);
++});
++
++test('CSV escapes commas, quotes, CR and LF in expenses and settlement names', () => {
++  const names = ['Zoë, "Z"', '李\nB'];
++  const expenses = [{ ...expense(201, names[0], names), description: 'Lunch, "special"\r\nTakeaway' }];
++  assert.equal(toCSV(names, expenses), [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    '"Lunch, ""special""\r\nTakeaway",2.01,"Zoë, ""Z""","Zoë, ""Z"", 李\nB"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    '"李\nB","Zoë, ""Z""",1.00,',
++    '',
++  ].join('\r\n'));
++  assert.ok(toCSV(['A\rB'], [{ ...expense(1, 'A\rB', ['A\rB']), description: 'Fare' }]).includes('Fare,0.01,"A\rB","A\rB"\r\n'));
++});
++
++test('CSV keeps headers for empty trips and omits transfers when already settled', () => {
++  const headers = 'Expenses,,,\r\nDescription,Amount (USD),Paid by,Participants\r\n';
++  const settlement = ',,,\r\nSettlement,,,\r\nFrom,To,Amount (USD),\r\n';
++  assert.equal(toCSV([], []), headers + settlement);
++  assert.equal(toCSV(people, []), headers + settlement);
++  assert.equal(toCSV(['A'], [{ ...expense(100, 'A', ['A']), description: 'Coffee' }]), headers + 'Coffee,1.00,A,A\r\n' + settlement);
++});
++
++test('CSV preserves precision at the largest supported cent amount', () => {
++  const expenses = [{ ...expense(Number.MAX_SAFE_INTEGER, 'A', ['B']), description: 'Total' }];
++  const csv = toCSV(['A', 'B'], expenses);
++  assert.ok(csv.includes('Total,90071992547409.91,A,B\r\n'));
++  assert.ok(csv.endsWith('B,A,90071992547409.91,\r\n'));
++});
++
+ test('splits cents exactly, assigning leftovers in participant order', () => {
+   assert.deepEqual(splitExpense(1000, people), { A: 334, B: 333, C: 333 });
+   assert.deepEqual(splitExpense(2, ['C', 'A', 'B']), { C: 1, A: 1, B: 0 });
+
+exec
+/bin/bash -lc "node --input-type=module <<'JS'
+import { chromium } from '/home/clawbox/.npm-global/lib/node_modules/openclaw/node_modules/playwright-core/index.mjs';
+import { createServer } from 'node:http';
+import { readFile, mkdtemp, rm } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+import { toCSV } from './logic.js';
+const downloadsPath = await mkdtemp('/home/clawbox/.cache/csv-check-');
+const server = createServer(async (req, res) => {
+  try {
+    const path = req.url === '/' ? '/index.html' : req.url;
+    res.setHeader('Content-Type', path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : 'text/html');
+    res.end(await readFile("'`${process.cwd()}${path}`));
+  } catch { res.writeHead(404).end(); }
+});
+await new Promise(resolve => server.listen(0, '"'127.0.0.1', resolve));
+let browser;
+try {
+  browser = await chromium.launch({ executablePath: '/snap/bin/chromium', downloadsPath, headless: true, args: ['--no-sandbox'] });
+  const page = await browser.newPage({ acceptDownloads: true });
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto("'`http://127.0.0.1:${server.address().port}`);
+  for (const name of ['"'Alice', 'Bob']) {
+    await page.locator('#person-name').fill(name);
+    await page.locator('#person-form button').click();
+  }
+  async function checkDownload(expectedPayments) {
+    assert.deepEqual(await page.locator('#settlements .payment').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-label'))), expectedPayments);
+    const pending = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Export CSV', exact: true }).click();
+    const download = await pending;
+    assert.equal(download.suggestedFilename(), 'splitsquad.csv');
+    const state = await page.evaluate(() => JSON.parse(localStorage.getItem('splitsquad.v1')));
+    assert.equal(await readFile(await download.path(), 'utf8'), toCSV(state.people, state.expenses));
+    assert.equal(await page.locator('a[download]').count(), 0);
+  }
+  await checkDownload([]);
+  await page.locator('#description').fill('Dinner, \"shared\"');
+  await page.locator('#amount').fill('10.01');
+  await page.locator('#expense-form button').click();
+  await checkDownload(['Bob pays Alice "'$5.00'"']);
+  await page.locator('#description').fill('Coffee');
+  await page.locator('#amount').fill('2');
+  await page.locator('#payer').selectOption('Bob');
+  await page.locator('#expense-form button').click();
+  await checkDownload(['Bob pays Alice "'$4.00'"']);
+  assert.deepEqual(errors, []);
+  console.log('Chromium download checks passed: empty trip, escaped expense, updated expenses and displayed settlement.');
+} finally {
+  await browser?.close();
+  await new Promise(resolve => server.close(resolve));
+  await rm(downloadsPath, { recursive: true, force: true });
+}
+JS" in /home/clawbox/expo-demo/runs/20261006-233530-fix/repo
+diff --git a/SPEC.md b/SPEC.md
+index 4386e065bbfd05204e86e415a6ca99f5eef442da..3013a454728f23c123be6669c855fc1c344ae1b3
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -9,6 +9,7 @@
+ - **Expenses:** add an expense with a description, an amount, who paid, and who shares it (everyone by default, or tick specific people). Expenses can be deleted.
+ - **Balances:** each person's net balance (paid minus share), shown in green for positive and red for negative. All amounts are calculated in integer cents so nothing is lost to rounding.
+ - **Settle up:** a short list of payments in the form "A → B: $X". It uses greedy matching (biggest debtor pays biggest creditor), so it never needs more than n−1 payments.
++- **Export CSV:** downloads the current expenses and final settlement as `splitsquad.csv`, with USD amounts to two decimal places and escaped text fields. Empty sections retain their headers.
+ - **Persistence:** everything is saved to localStorage automatically and restored on reload. A "Reset trip" button clears it after a confirmation.
+ - **Totals:** the total trip spend and the cost per person are shown at the top.
+ 
+diff --git a/app.js b/app.js
+index 5c6c8e3e0f4dd4a110b4e557bc6bc830c429d5f1..15745c69d3af6aa120f2f428be283f757ab30fdd
+--- a/app.js
++++ b/app.js
+@@ -1,4 +1,4 @@
+-import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal } from './logic.js';
++import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal, toCSV } from './logic.js';
+ 
+ const $ = id => document.getElementById(id);
+ const STORAGE_KEY = 'splitsquad.v1';
+@@ -189,6 +189,17 @@
+     error('expense-error'); persist(); render();
+   } catch (cause) { error('expense-error', cause.message); }
+ });
++$('export-csv').addEventListener('click', () => {
++  const blob = new Blob([toCSV(state.people, state.expenses)], { type: 'text/csv;charset=utf-8' });
++  const url = URL.createObjectURL(blob);
++  const link = document.createElement('a');
++  link.href = url;
++  link.download = 'splitsquad.csv';
++  document.body.append(link);
++  link.click();
++  link.remove();
++  setTimeout(() => URL.revokeObjectURL(url), 1000);
++});
+ $('reset').addEventListener('click', () => {
+   if (!window.confirm('Reset this trip? All people and expenses will be removed.')) return;
+   state = { people: [], expenses: [] };
+diff --git a/index.html b/index.html
+index bd57af554a5fa3f76fe3efa615982e29bbdf669d..333efefb745d2a28b8c14e8e9d658f441bbae30a
+--- a/index.html
++++ b/index.html
+@@ -43,6 +43,7 @@
+     <section class="card settlement" aria-labelledby="settle-title">
+       <div class="card-heading"><span class="section-icon" aria-hidden="true">⇄</span><div><h2 id="settle-title">Settle up</h2><p>A few payments. Everyone's square.</p></div><span class="step">03</span></div>
+       <div id="settlements" aria-live="polite"></div>
++      <button id="export-csv" class="text-button" type="button">Export CSV</button>
+       <div class="settle-note"><span aria-hidden="true">✓</span> Fewer transfers, more time together.</div>
+     </section>
+     <footer><span class="footer-brand">SplitSquad</span><span>Built live by ClawBox AI</span></footer>
+diff --git a/logic.js b/logic.js
+index a204a14c9dcebc6a03b0077907a4c51bcdbcf190..788a5802c5bf4dcd5a7a24d0cf70acde541978e4
+--- a/logic.js
++++ b/logic.js
+@@ -66,3 +66,23 @@
+   }
+   return transfers;
+ }
++
++function csvCell(value) {
++  return /[,"\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
++}
++
++/** Export expenses and the computed settlement as CSV, with amounts in USD. */
++export function toCSV(people, expenses) {
++  const transfers = settle(computeBalances(people, expenses));
++  const amount = cents => `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
++  const rows = [
++    ['Expenses', '', '', ''],
++    ['Description', 'Amount (USD)', 'Paid by', 'Participants'],
++    ...expenses.map(expense => [expense.description, amount(expense.amount), expense.paidBy, expense.participants.join(', ')]),
++    ['', '', '', ''],
++    ['Settlement', '', '', ''],
++    ['From', 'To', 'Amount (USD)', ''],
++    ...transfers.map(payment => [payment.from, payment.to, amount(payment.amount), '']),
++  ];
++  return rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
++}
+diff --git a/tests/logic.test.mjs b/tests/logic.test.mjs
+index 90d6e1a230cb4030f01de282821769cb1b7157f2..a8e9dcc60f33b0cc3626821c53ee7c030507b067
+--- a/tests/logic.test.mjs
++++ b/tests/logic.test.mjs
+@@ -1,9 +1,63 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+-import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal } from '../logic.js';
++import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal, toCSV } from '../logic.js';
+ const people = ['A', 'B', 'C'];
+ const expense = (amount, paidBy = 'A', participants = people) => ({ amount, paidBy, participants });
+ 
++test('CSV exports expenses and final settlement with exact cents without mutating inputs', () => {
++  const expenses = [
++    { ...expense(1001), description: 'Dinner' },
++    { ...expense(2, 'B', ['B', 'C']), description: 'Tip' },
++  ];
++  const before = structuredClone({ people, expenses });
++  const expected = [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    'Dinner,10.01,A,"A, B, C"',
++    'Tip,0.02,B,"B, C"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    'C,A,3.34,',
++    'B,A,3.33,',
++    '',
++  ].join('\r\n');
++  assert.equal(toCSV(people, expenses), expected);
++  assert.equal(toCSV(people, expenses), expected);
++  assert.deepEqual({ people, expenses }, before);
++});
++
++test('CSV escapes commas, quotes, CR and LF in expenses and settlement names', () => {
++  const names = ['Zoë, "Z"', '李\nB'];
++  const expenses = [{ ...expense(201, names[0], names), description: 'Lunch, "special"\r\nTakeaway' }];
++  assert.equal(toCSV(names, expenses), [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    '"Lunch, ""special""\r\nTakeaway",2.01,"Zoë, ""Z""","Zoë, ""Z"", 李\nB"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    '"李\nB","Zoë, ""Z""",1.00,',
++    '',
++  ].join('\r\n'));
++  assert.ok(toCSV(['A\rB'], [{ ...expense(1, 'A\rB', ['A\rB']), description: 'Fare' }]).includes('Fare,0.01,"A\rB","A\rB"\r\n'));
++});
++
++test('CSV keeps headers for empty trips and omits transfers when already settled', () => {
++  const headers = 'Expenses,,,\r\nDescription,Amount (USD),Paid by,Participants\r\n';
++  const settlement = ',,,\r\nSettlement,,,\r\nFrom,To,Amount (USD),\r\n';
++  assert.equal(toCSV([], []), headers + settlement);
++  assert.equal(toCSV(people, []), headers + settlement);
++  assert.equal(toCSV(['A'], [{ ...expense(100, 'A', ['A']), description: 'Coffee' }]), headers + 'Coffee,1.00,A,A\r\n' + settlement);
++});
++
++test('CSV preserves precision at the largest supported cent amount', () => {
++  const expenses = [{ ...expense(Number.MAX_SAFE_INTEGER, 'A', ['B']), description: 'Total' }];
++  const csv = toCSV(['A', 'B'], expenses);
++  assert.ok(csv.includes('Total,90071992547409.91,A,B\r\n'));
++  assert.ok(csv.endsWith('B,A,90071992547409.91,\r\n'));
++});
++
+ test('splits cents exactly, assigning leftovers in participant order', () => {
+   assert.deepEqual(splitExpense(1000, people), { A: 334, B: 333, C: 333 });
+   assert.deepEqual(splitExpense(2, ['C', 'A', 'B']), { C: 1, A: 1, B: 0 });
+
+ succeeded in 2413ms:
+Chromium download checks passed: empty trip, escaped expense, updated expenses and displayed settlement.
+
+diff --git a/SPEC.md b/SPEC.md
+index 4386e065bbfd05204e86e415a6ca99f5eef442da..3013a454728f23c123be6669c855fc1c344ae1b3
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -9,6 +9,7 @@
+ - **Expenses:** add an expense with a description, an amount, who paid, and who shares it (everyone by default, or tick specific people). Expenses can be deleted.
+ - **Balances:** each person's net balance (paid minus share), shown in green for positive and red for negative. All amounts are calculated in integer cents so nothing is lost to rounding.
+ - **Settle up:** a short list of payments in the form "A → B: $X". It uses greedy matching (biggest debtor pays biggest creditor), so it never needs more than n−1 payments.
++- **Export CSV:** downloads the current expenses and final settlement as `splitsquad.csv`, with USD amounts to two decimal places and escaped text fields. Empty sections retain their headers.
+ - **Persistence:** everything is saved to localStorage automatically and restored on reload. A "Reset trip" button clears it after a confirmation.
+ - **Totals:** the total trip spend and the cost per person are shown at the top.
+ 
+diff --git a/app.js b/app.js
+index 5c6c8e3e0f4dd4a110b4e557bc6bc830c429d5f1..15745c69d3af6aa120f2f428be283f757ab30fdd
+--- a/app.js
++++ b/app.js
+@@ -1,4 +1,4 @@
+-import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal } from './logic.js';
++import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal, toCSV } from './logic.js';
+ 
+ const $ = id => document.getElementById(id);
+ const STORAGE_KEY = 'splitsquad.v1';
+@@ -189,6 +189,17 @@
+     error('expense-error'); persist(); render();
+   } catch (cause) { error('expense-error', cause.message); }
+ });
++$('export-csv').addEventListener('click', () => {
++  const blob = new Blob([toCSV(state.people, state.expenses)], { type: 'text/csv;charset=utf-8' });
++  const url = URL.createObjectURL(blob);
++  const link = document.createElement('a');
++  link.href = url;
++  link.download = 'splitsquad.csv';
++  document.body.append(link);
++  link.click();
++  link.remove();
++  setTimeout(() => URL.revokeObjectURL(url), 1000);
++});
+ $('reset').addEventListener('click', () => {
+   if (!window.confirm('Reset this trip? All people and expenses will be removed.')) return;
+   state = { people: [], expenses: [] };
+diff --git a/index.html b/index.html
+index bd57af554a5fa3f76fe3efa615982e29bbdf669d..333efefb745d2a28b8c14e8e9d658f441bbae30a
+--- a/index.html
++++ b/index.html
+@@ -43,6 +43,7 @@
+     <section class="card settlement" aria-labelledby="settle-title">
+       <div class="card-heading"><span class="section-icon" aria-hidden="true">⇄</span><div><h2 id="settle-title">Settle up</h2><p>A few payments. Everyone's square.</p></div><span class="step">03</span></div>
+       <div id="settlements" aria-live="polite"></div>
++      <button id="export-csv" class="text-button" type="button">Export CSV</button>
+       <div class="settle-note"><span aria-hidden="true">✓</span> Fewer transfers, more time together.</div>
+     </section>
+     <footer><span class="footer-brand">SplitSquad</span><span>Built live by ClawBox AI</span></footer>
+diff --git a/logic.js b/logic.js
+index a204a14c9dcebc6a03b0077907a4c51bcdbcf190..788a5802c5bf4dcd5a7a24d0cf70acde541978e4
+--- a/logic.js
++++ b/logic.js
+@@ -66,3 +66,23 @@
+   }
+   return transfers;
+ }
++
++function csvCell(value) {
++  return /[,"\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
++}
++
++/** Export expenses and the computed settlement as CSV, with amounts in USD. */
++export function toCSV(people, expenses) {
++  const transfers = settle(computeBalances(people, expenses));
++  const amount = cents => `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
++  const rows = [
++    ['Expenses', '', '', ''],
++    ['Description', 'Amount (USD)', 'Paid by', 'Participants'],
++    ...expenses.map(expense => [expense.description, amount(expense.amount), expense.paidBy, expense.participants.join(', ')]),
++    ['', '', '', ''],
++    ['Settlement', '', '', ''],
++    ['From', 'To', 'Amount (USD)', ''],
++    ...transfers.map(payment => [payment.from, payment.to, amount(payment.amount), '']),
++  ];
++  return rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
++}
+diff --git a/tests/logic.test.mjs b/tests/logic.test.mjs
+index 90d6e1a230cb4030f01de282821769cb1b7157f2..a8e9dcc60f33b0cc3626821c53ee7c030507b067
+--- a/tests/logic.test.mjs
++++ b/tests/logic.test.mjs
+@@ -1,9 +1,63 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+-import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal } from '../logic.js';
++import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal, toCSV } from '../logic.js';
+ const people = ['A', 'B', 'C'];
+ const expense = (amount, paidBy = 'A', participants = people) => ({ amount, paidBy, participants });
+ 
++test('CSV exports expenses and final settlement with exact cents without mutating inputs', () => {
++  const expenses = [
++    { ...expense(1001), description: 'Dinner' },
++    { ...expense(2, 'B', ['B', 'C']), description: 'Tip' },
++  ];
++  const before = structuredClone({ people, expenses });
++  const expected = [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    'Dinner,10.01,A,"A, B, C"',
++    'Tip,0.02,B,"B, C"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    'C,A,3.34,',
++    'B,A,3.33,',
++    '',
++  ].join('\r\n');
++  assert.equal(toCSV(people, expenses), expected);
++  assert.equal(toCSV(people, expenses), expected);
++  assert.deepEqual({ people, expenses }, before);
++});
++
++test('CSV escapes commas, quotes, CR and LF in expenses and settlement names', () => {
++  const names = ['Zoë, "Z"', '李\nB'];
++  const expenses = [{ ...expense(201, names[0], names), description: 'Lunch, "special"\r\nTakeaway' }];
++  assert.equal(toCSV(names, expenses), [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    '"Lunch, ""special""\r\nTakeaway",2.01,"Zoë, ""Z""","Zoë, ""Z"", 李\nB"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    '"李\nB","Zoë, ""Z""",1.00,',
++    '',
++  ].join('\r\n'));
++  assert.ok(toCSV(['A\rB'], [{ ...expense(1, 'A\rB', ['A\rB']), description: 'Fare' }]).includes('Fare,0.01,"A\rB","A\rB"\r\n'));
++});
++
++test('CSV keeps headers for empty trips and omits transfers when already settled', () => {
++  const headers = 'Expenses,,,\r\nDescription,Amount (USD),Paid by,Participants\r\n';
++  const settlement = ',,,\r\nSettlement,,,\r\nFrom,To,Amount (USD),\r\n';
++  assert.equal(toCSV([], []), headers + settlement);
++  assert.equal(toCSV(people, []), headers + settlement);
++  assert.equal(toCSV(['A'], [{ ...expense(100, 'A', ['A']), description: 'Coffee' }]), headers + 'Coffee,1.00,A,A\r\n' + settlement);
++});
++
++test('CSV preserves precision at the largest supported cent amount', () => {
++  const expenses = [{ ...expense(Number.MAX_SAFE_INTEGER, 'A', ['B']), description: 'Total' }];
++  const csv = toCSV(['A', 'B'], expenses);
++  assert.ok(csv.includes('Total,90071992547409.91,A,B\r\n'));
++  assert.ok(csv.endsWith('B,A,90071992547409.91,\r\n'));
++});
++
+ test('splits cents exactly, assigning leftovers in participant order', () => {
+   assert.deepEqual(splitExpense(1000, people), { A: 334, B: 333, C: 333 });
+   assert.deepEqual(splitExpense(2, ['C', 'A', 'B']), { C: 1, A: 1, B: 0 });
+
+codex
+Added “Export CSV” for expenses and final settlement.
+Pure `toCSV()` handles escaping, CRLF endings, and exact cent formatting.
+All 18 tests pass; Chromium download checks pass.
+Updated SPEC.md. No commit created.
+diff --git a/SPEC.md b/SPEC.md
+index 4386e065bbfd05204e86e415a6ca99f5eef442da..3013a454728f23c123be6669c855fc1c344ae1b3
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -9,6 +9,7 @@
+ - **Expenses:** add an expense with a description, an amount, who paid, and who shares it (everyone by default, or tick specific people). Expenses can be deleted.
+ - **Balances:** each person's net balance (paid minus share), shown in green for positive and red for negative. All amounts are calculated in integer cents so nothing is lost to rounding.
+ - **Settle up:** a short list of payments in the form "A → B: $X". It uses greedy matching (biggest debtor pays biggest creditor), so it never needs more than n−1 payments.
++- **Export CSV:** downloads the current expenses and final settlement as `splitsquad.csv`, with USD amounts to two decimal places and escaped text fields. Empty sections retain their headers.
+ - **Persistence:** everything is saved to localStorage automatically and restored on reload. A "Reset trip" button clears it after a confirmation.
+ - **Totals:** the total trip spend and the cost per person are shown at the top.
+ 
+diff --git a/app.js b/app.js
+index 5c6c8e3e0f4dd4a110b4e557bc6bc830c429d5f1..15745c69d3af6aa120f2f428be283f757ab30fdd
+--- a/app.js
++++ b/app.js
+@@ -1,4 +1,4 @@
+-import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal } from './logic.js';
++import { parseAmount, validateName, computeBalances, settle, canRemovePerson, tripTotal, toCSV } from './logic.js';
+ 
+ const $ = id => document.getElementById(id);
+ const STORAGE_KEY = 'splitsquad.v1';
+@@ -189,6 +189,17 @@
+     error('expense-error'); persist(); render();
+   } catch (cause) { error('expense-error', cause.message); }
+ });
++$('export-csv').addEventListener('click', () => {
++  const blob = new Blob([toCSV(state.people, state.expenses)], { type: 'text/csv;charset=utf-8' });
++  const url = URL.createObjectURL(blob);
++  const link = document.createElement('a');
++  link.href = url;
++  link.download = 'splitsquad.csv';
++  document.body.append(link);
++  link.click();
++  link.remove();
++  setTimeout(() => URL.revokeObjectURL(url), 1000);
++});
+ $('reset').addEventListener('click', () => {
+   if (!window.confirm('Reset this trip? All people and expenses will be removed.')) return;
+   state = { people: [], expenses: [] };
+diff --git a/index.html b/index.html
+index bd57af554a5fa3f76fe3efa615982e29bbdf669d..333efefb745d2a28b8c14e8e9d658f441bbae30a
+--- a/index.html
++++ b/index.html
+@@ -43,6 +43,7 @@
+     <section class="card settlement" aria-labelledby="settle-title">
+       <div class="card-heading"><span class="section-icon" aria-hidden="true">⇄</span><div><h2 id="settle-title">Settle up</h2><p>A few payments. Everyone's square.</p></div><span class="step">03</span></div>
+       <div id="settlements" aria-live="polite"></div>
++      <button id="export-csv" class="text-button" type="button">Export CSV</button>
+       <div class="settle-note"><span aria-hidden="true">✓</span> Fewer transfers, more time together.</div>
+     </section>
+     <footer><span class="footer-brand">SplitSquad</span><span>Built live by ClawBox AI</span></footer>
+diff --git a/logic.js b/logic.js
+index a204a14c9dcebc6a03b0077907a4c51bcdbcf190..788a5802c5bf4dcd5a7a24d0cf70acde541978e4
+--- a/logic.js
++++ b/logic.js
+@@ -66,3 +66,23 @@
+   }
+   return transfers;
+ }
++
++function csvCell(value) {
++  return /[,"\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
++}
++
++/** Export expenses and the computed settlement as CSV, with amounts in USD. */
++export function toCSV(people, expenses) {
++  const transfers = settle(computeBalances(people, expenses));
++  const amount = cents => `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
++  const rows = [
++    ['Expenses', '', '', ''],
++    ['Description', 'Amount (USD)', 'Paid by', 'Participants'],
++    ...expenses.map(expense => [expense.description, amount(expense.amount), expense.paidBy, expense.participants.join(', ')]),
++    ['', '', '', ''],
++    ['Settlement', '', '', ''],
++    ['From', 'To', 'Amount (USD)', ''],
++    ...transfers.map(payment => [payment.from, payment.to, amount(payment.amount), '']),
++  ];
++  return rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
++}
+diff --git a/tests/logic.test.mjs b/tests/logic.test.mjs
+index 90d6e1a230cb4030f01de282821769cb1b7157f2..a8e9dcc60f33b0cc3626821c53ee7c030507b067
+--- a/tests/logic.test.mjs
++++ b/tests/logic.test.mjs
+@@ -1,9 +1,63 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+-import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal } from '../logic.js';
++import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal, toCSV } from '../logic.js';
+ const people = ['A', 'B', 'C'];
+ const expense = (amount, paidBy = 'A', participants = people) => ({ amount, paidBy, participants });
+ 
++test('CSV exports expenses and final settlement with exact cents without mutating inputs', () => {
++  const expenses = [
++    { ...expense(1001), description: 'Dinner' },
++    { ...expense(2, 'B', ['B', 'C']), description: 'Tip' },
++  ];
++  const before = structuredClone({ people, expenses });
++  const expected = [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    'Dinner,10.01,A,"A, B, C"',
++    'Tip,0.02,B,"B, C"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    'C,A,3.34,',
++    'B,A,3.33,',
++    '',
++  ].join('\r\n');
++  assert.equal(toCSV(people, expenses), expected);
++  assert.equal(toCSV(people, expenses), expected);
++  assert.deepEqual({ people, expenses }, before);
++});
++
++test('CSV escapes commas, quotes, CR and LF in expenses and settlement names', () => {
++  const names = ['Zoë, "Z"', '李\nB'];
++  const expenses = [{ ...expense(201, names[0], names), description: 'Lunch, "special"\r\nTakeaway' }];
++  assert.equal(toCSV(names, expenses), [
++    'Expenses,,,',
++    'Description,Amount (USD),Paid by,Participants',
++    '"Lunch, ""special""\r\nTakeaway",2.01,"Zoë, ""Z""","Zoë, ""Z"", 李\nB"',
++    ',,,',
++    'Settlement,,,',
++    'From,To,Amount (USD),',
++    '"李\nB","Zoë, ""Z""",1.00,',
++    '',
++  ].join('\r\n'));
++  assert.ok(toCSV(['A\rB'], [{ ...expense(1, 'A\rB', ['A\rB']), description: 'Fare' }]).includes('Fare,0.01,"A\rB","A\rB"\r\n'));
++});
++
++test('CSV keeps headers for empty trips and omits transfers when already settled', () => {
++  const headers = 'Expenses,,,\r\nDescription,Amount (USD),Paid by,Participants\r\n';
++  const settlement = ',,,\r\nSettlement,,,\r\nFrom,To,Amount (USD),\r\n';
++  assert.equal(toCSV([], []), headers + settlement);
++  assert.equal(toCSV(people, []), headers + settlement);
++  assert.equal(toCSV(['A'], [{ ...expense(100, 'A', ['A']), description: 'Coffee' }]), headers + 'Coffee,1.00,A,A\r\n' + settlement);
++});
++
++test('CSV preserves precision at the largest supported cent amount', () => {
++  const expenses = [{ ...expense(Number.MAX_SAFE_INTEGER, 'A', ['B']), description: 'Total' }];
++  const csv = toCSV(['A', 'B'], expenses);
++  assert.ok(csv.includes('Total,90071992547409.91,A,B\r\n'));
++  assert.ok(csv.endsWith('B,A,90071992547409.91,\r\n'));
++});
++
+ test('splits cents exactly, assigning leftovers in participant order', () => {
+   assert.deepEqual(splitExpense(1000, people), { A: 334, B: 333, C: 333 });
+   assert.deepEqual(splitExpense(2, ['C', 'A', 'B']), { C: 1, A: 1, B: 0 });
+
+tokens used
+35,051
+Added “Export CSV” for expenses and final settlement.
+Pure `toCSV()` handles escaping, CRLF endings, and exact cent formatting.
+All 18 tests pass; Chromium download checks pass.
+Updated SPEC.md. No commit created.

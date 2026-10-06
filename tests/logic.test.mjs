@@ -1,8 +1,71 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal } from '../logic.js';
+import { splitExpense, computeBalances, settle, parseAmount, validateName, canRemovePerson, tripTotal, toCSV } from '../logic.js';
 const people = ['A', 'B', 'C'];
 const expense = (amount, paidBy = 'A', participants = people) => ({ amount, paidBy, participants });
+
+test('CSV exports expenses and final settlement with exact cents without mutating inputs', () => {
+  const expenses = [
+    { ...expense(1001), description: 'Dinner' },
+    { ...expense(2, 'B', ['B', 'C']), description: 'Tip' },
+  ];
+  const before = structuredClone({ people, expenses });
+  const expected = [
+    'Expenses,,,',
+    'Description,Amount (USD),Paid by,Participants',
+    'Dinner,10.01,A,"A, B, C"',
+    'Tip,0.02,B,"B, C"',
+    ',,,',
+    'Settlement,,,',
+    'From,To,Amount (USD),',
+    'C,A,3.34,',
+    'B,A,3.33,',
+    '',
+  ].join('\r\n');
+  assert.equal(toCSV(people, expenses), expected);
+  assert.equal(toCSV(people, expenses), expected);
+  assert.deepEqual({ people, expenses }, before);
+});
+
+test('CSV escapes commas, quotes, CR and LF in expenses and settlement names', () => {
+  const names = ['Zoë, "Z"', '李\nB'];
+  const expenses = [{ ...expense(201, names[0], names), description: 'Lunch, "special"\r\nTakeaway' }];
+  assert.equal(toCSV(names, expenses), [
+    'Expenses,,,',
+    'Description,Amount (USD),Paid by,Participants',
+    '"Lunch, ""special""\r\nTakeaway",2.01,"Zoë, ""Z""","Zoë, ""Z"", 李\nB"',
+    ',,,',
+    'Settlement,,,',
+    'From,To,Amount (USD),',
+    '"李\nB","Zoë, ""Z""",1.00,',
+    '',
+  ].join('\r\n'));
+  assert.ok(toCSV(['A\rB'], [{ ...expense(1, 'A\rB', ['A\rB']), description: 'Fare' }]).includes('Fare,0.01,"A\rB","A\rB"\r\n'));
+});
+
+test('CSV neutralises spreadsheet formulas in text fields', () => {
+  const names = ['=Ann', '@Bo'];
+  const expenses = [{ ...expense(300, names[0], names), description: '=HYPERLINK("x","y"), +1' }];
+  const csv = toCSV(names, expenses);
+  assert.ok(csv.includes(`"'=HYPERLINK(""x"",""y""), +1",3.00,'=Ann,"'=Ann, @Bo"\r\n`));
+  assert.ok(csv.includes("'@Bo,'=Ann,1.50,\r\n"));
+  assert.ok(toCSV(['A'], [{ ...expense(5, 'A', ['A']), description: '-5' }]).includes("'-5,0.05,A,A\r\n"));
+});
+
+test('CSV keeps headers for empty trips and omits transfers when already settled', () => {
+  const headers = 'Expenses,,,\r\nDescription,Amount (USD),Paid by,Participants\r\n';
+  const settlement = ',,,\r\nSettlement,,,\r\nFrom,To,Amount (USD),\r\n';
+  assert.equal(toCSV([], []), headers + settlement);
+  assert.equal(toCSV(people, []), headers + settlement);
+  assert.equal(toCSV(['A'], [{ ...expense(100, 'A', ['A']), description: 'Coffee' }]), headers + 'Coffee,1.00,A,A\r\n' + settlement);
+});
+
+test('CSV preserves precision at the largest supported cent amount', () => {
+  const expenses = [{ ...expense(Number.MAX_SAFE_INTEGER, 'A', ['B']), description: 'Total' }];
+  const csv = toCSV(['A', 'B'], expenses);
+  assert.ok(csv.includes('Total,90071992547409.91,A,B\r\n'));
+  assert.ok(csv.endsWith('B,A,90071992547409.91,\r\n'));
+});
 
 test('splits cents exactly, assigning leftovers in participant order', () => {
   assert.deepEqual(splitExpense(1000, people), { A: 334, B: 333, C: 333 });

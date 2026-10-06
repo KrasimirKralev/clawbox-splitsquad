@@ -66,3 +66,25 @@ export function settle(balances) {
   }
   return transfers;
 }
+
+/** Quotes per RFC 4180 and neutralises leading formula characters so spreadsheets show text, not formulas. */
+function csvCell(value) {
+  const text = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return /[,"\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+/** Export expenses and the computed settlement as CSV, with amounts in USD. */
+export function toCSV(people, expenses) {
+  const transfers = settle(computeBalances(people, expenses));
+  const amount = cents => `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
+  const rows = [
+    ['Expenses', '', '', ''],
+    ['Description', 'Amount (USD)', 'Paid by', 'Participants'],
+    ...expenses.map(expense => [expense.description, amount(expense.amount), expense.paidBy, expense.participants.join(', ')]),
+    ['', '', '', ''],
+    ['Settlement', '', '', ''],
+    ['From', 'To', 'Amount (USD)', ''],
+    ...transfers.map(payment => [payment.from, payment.to, amount(payment.amount), '']),
+  ];
+  return rows.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
+}

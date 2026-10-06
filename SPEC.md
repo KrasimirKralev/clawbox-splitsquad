@@ -9,6 +9,7 @@ It shows who owes whom using as few payments as possible, so everyone can settle
 - **Expenses:** add an expense with a description, an amount, who paid, and who shares it (everyone by default, or tick specific people). Expenses can be deleted.
 - **Balances:** each person's net balance (paid minus share), shown in green for positive and red for negative. All amounts are calculated in integer cents so nothing is lost to rounding.
 - **Settle up:** a short list of payments in the form "A → B: $X". It uses greedy matching (biggest debtor pays biggest creditor), so it never needs more than n−1 payments.
+- **Export CSV:** downloads the current expenses and final settlement as `splitsquad.csv`, with USD amounts to two decimal places and escaped text fields (text starting with `=`, `+`, `-`, `@` is prefixed with `'` so spreadsheets do not run it as a formula). Empty sections retain their headers.
 - **Persistence:** everything is saved to localStorage automatically and restored on reload. A "Reset trip" button clears it after a confirmation.
 - **Totals:** the total trip spend and the cost per person are shown at the top.
 
