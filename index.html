@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#106c75">
+  <meta name="description" content="Less money math. More good times. Split your trip expenses and settle up with friends.">
+  <title>SplitSquad — Good times, split fairly.</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <main class="app">
+    <header class="hero">
+      <div class="brand-row"><a class="brand" href="./" aria-label="SplitSquad home"><span class="brand-icon" aria-hidden="true">⇄</span>SplitSquad<span class="brand-dot">.</span></a><span class="trip-tag">THE TRIP TAB</span></div>
+      <h1>Good times.<br>Split fairly.</h1>
+      <p>Less money math. More memories.</p>
+      <div class="totals" aria-live="polite">
+        <div><span class="stat-label">Total trip spend</span><strong id="total">$0.00</strong></div>
+        <div><span class="stat-label">Cost per person <span title="Average trip spend across all people">↗</span></span><strong id="average">$0.00</strong></div>
+      </div>
+    </header>
+    <div class="status-bar"><span id="save-status"><span class="status-dot"></span> Saved on this device</span><button id="reset" class="text-button" type="button">Reset trip <span aria-hidden="true">↺</span></button></div>
+    <p id="global-error" class="error global-error" role="alert" hidden></p>
+    <section class="card" aria-labelledby="people-title">
+      <div class="card-heading"><span class="section-icon" aria-hidden="true">♧</span><div><h2 id="people-title">The squad <span id="people-count" class="count">0</span></h2><p>Who's coming along?</p></div><span class="step">01</span></div>
+      <form id="person-form" novalidate><label class="sr-only" for="person-name">Person's name</label><div class="input-row"><input id="person-name" placeholder="Enter a friend's name" autocomplete="off" maxlength="60" aria-describedby="person-error"><button class="primary add-button" type="submit"><span aria-hidden="true">＋</span> Add</button></div><p id="person-error" class="error" role="alert" hidden></p></form>
+      <div id="people-list" class="people-list"></div>
+      <p id="people-hint" class="hint">Add at least 2 people to get the good times going.</p>
+      <div id="balance-area" class="balance-area" hidden><div class="subheading">LIVE BALANCES <span>Paid − share</span></div><div id="balances"></div></div>
+    </section>
+    <section class="card" aria-labelledby="expenses-title">
+      <div class="card-heading"><span class="section-icon" aria-hidden="true">▤</span><div><h2 id="expenses-title">Expenses <span id="expense-count" class="count">0</span></h2><p>Big adventures. Little receipts.</p></div><span class="step">02</span></div>
+      <form id="expense-form" novalidate>
+        <div class="field"><label for="description">What was it for?</label><input id="description" placeholder="e.g. Dinner by the beach" maxlength="150" aria-describedby="expense-error"></div>
+        <div class="form-columns"><div class="field"><label for="amount">Amount</label><div class="amount-input"><span aria-hidden="true">$</span><input id="amount" inputmode="decimal" placeholder="0.00" aria-describedby="expense-error"></div></div><div class="field"><label for="payer">Paid by</label><select id="payer" aria-describedby="expense-error"><option value="">Select a person</option></select></div></div>
+        <fieldset><legend>Split between</legend><label class="everyone"><input type="checkbox" id="everyone" checked> Everyone <span>Equal shares</span></label><div id="participants" class="participants"></div></fieldset>
+        <p id="expense-error" class="error" role="alert" hidden></p>
+        <button class="primary expense-submit" type="submit"><span aria-hidden="true">＋</span> Add expense</button>
+      </form>
+      <div class="expense-history"><div class="subheading">THE RUNNING TAB <span id="tab-count">0 expenses</span></div><div id="expense-list"></div></div>
+    </section>
+    <section class="card settlement" aria-labelledby="settle-title">
+      <div class="card-heading"><span class="section-icon" aria-hidden="true">⇄</span><div><h2 id="settle-title">Settle up</h2><p>A few payments. Everyone's square.</p></div><span class="step">03</span></div>
+      <div id="settlements" aria-live="polite"></div>
+      <div class="settle-note"><span aria-hidden="true">✓</span> Fewer transfers, more time together.</div>
+    </section>
+    <footer><span class="footer-brand">SplitSquad</span><span>Built live by ClawBox AI</span></footer>
+  </main>
+</body>
+</html>

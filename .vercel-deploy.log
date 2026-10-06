@@ -1,0 +1,29 @@
+<claude-code-hint v="1" type="plugin" value="vercel@claude-plugins-official" />
+Vercel CLI 59.20.0 (Node.js 24.21.0)
+The "--name" option is deprecated (https://vercel.link/name-flag)
+Loading teams…
+
+  Directory       ~/expo-demo/runs/20261006-232707-app/app
+
+Searching for existing projects…
+
+  No framework detected. Default Project Settings:
+  Build Command: `npm run vercel-build` or `npm run build`
+  Development Command: None
+  Install Command: `yarn install`, `pnpm install`, `npm install`, or `bun install`
+  Output Directory: `public` if it exists, or `.`
+
+✓ Created         krasis-projects-51fd0e61/clawbox-splitsquad
+Deploying krasis-projects-51fd0e61/clawbox-splitsquad
+Uploading [--------------------] (0.0B/35.7KB)
+Uploading [======--------------] (11.9KB/35.7KB)
+Uploading [===========---------] (20.4KB/35.7KB)
+Uploading [===================-] (35.6KB/35.7KB)
+Uploading [====================] (35.7KB/35.7KB)
+  Inspect         https://vercel.com/krasis-projects-51fd0e61/clawbox-splitsquad/FNB9ag3o9YKMHtryfiCXJy8AjAbr
+  Production      https://clawbox-splitsquad-3hj351jmy-krasis-projects-51fd0e61.vercel.app
+Building…
+Building…
+[2K[1A[2K[G  Production      https://clawbox-splitsquad-3hj351jmy-krasis-projects-51fd0e61.vercel.app
+Completing…
+▲ Aliased         https://clawbox-splitsquad.vercel.app
